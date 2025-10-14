@@ -9,8 +9,8 @@ use crate::Logger;
 
 // lexer        [X]
 // parser       [X]
-// preprocessor [/]
-// - macros             []
+// preprocessor [X]
+// - macros             [X]
 // - directives         [X]
 // - symbol resolution  [X]
 // - type checking      [X]
