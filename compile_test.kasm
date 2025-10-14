@@ -1,0 +1,127 @@
+.const .f64v REACT_TIME 2.0
+
+jmp main
+
+hover_throttle:
+    ; t = (g + (tgt_v - vertical_speed) / REACT_TIME) m / (F * dot(fore, up))
+    push "$ship"
+    gmb "verticalspeed"
+    sub
+    pushv REACT_TIME
+    div
+    swap
+    argb
+    swap
+    
+
+    ; g
+    push "$ship"
+    gmb "body"
+    gmb "mu"
+    push "$ship"
+    gmb "body"
+    gmb "position"
+    gmb "sqrmagnitude"
+    div
+
+    add
+
+    push "$ship"
+    gmb "mass"
+    mul
+
+    push "$ship"
+    gmb "availablethrust"
+
+    push @
+
+    push "$ship"
+    gmb "facing"
+    gmb "forevector"
+
+    push "$ship"
+    gmb "body"
+    gmb "position"
+    gmb "normalized"
+    neg
+
+    call #, "vdot()"
+
+    mul
+
+    div
+
+    ret 0
+
+main:
+    argb
+    push 3
+    wait
+    pushv 0
+    sto "$tgt_v"
+    ; lock rcs
+    push "$ship"
+    gmb "control"
+    pushv 0.001
+    smb "top"
+
+loop:
+    push 0
+    wait
+    
+    push @
+    push "$tgt_v"
+    eval
+    call #, hover_throttle
+    sto "$throttle"
+
+    push @
+    push "$tgt_v"
+    eval
+    call #, "print()"
+    pop
+
+    push "$tgt_v"
+    push "$ship"
+    gmb "control"
+    gmb "pilottop"
+    pushv 0.05
+    mul
+    sub
+    sto "$tgt_v"
+
+    push "$ship"
+    gmb "control"
+    dup
+    gmb "pilotroll"
+    neg
+    smb "roll"
+
+    push "$ship"
+    gmb "control"
+    gmb "pilotmainthrottle"
+    push 0
+    cgt
+    btr loop
+
+exit:
+    push "$ship"
+    gmb "control"
+    push "$throttle"
+    eval
+    smb "pilotmainthrottle"
+
+    push "$ship"
+    gmb "control"
+    dup
+    pushv 0
+    smb "top"
+    pushv 0
+    smb "roll"
+    
+    push @
+    push "throttle"
+    push false
+    call #, "toggleflybywire"
+
+    eop
