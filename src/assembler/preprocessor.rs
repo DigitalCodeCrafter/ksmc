@@ -86,6 +86,7 @@ fn expand_macros(stmts: &[Statement]) -> Result<Vec<Statement>, AssembleError> {
     let mut output = Vec::new();
     let mut iter = stmts.iter().peekable();
 
+    let mut next_id = 0;
     while let Some(stmt) = iter.next() {
         match stmt {
             Statement::Directive(line, name, args) if name == "macro" => {
@@ -93,7 +94,7 @@ fn expand_macros(stmts: &[Statement]) -> Result<Vec<Statement>, AssembleError> {
                 macros.insert(macro_def.name.clone(), macro_def);
             }
             Statement::Instruction(instr) if macros.contains_key(&instr.name) => {
-                let expanded = expand_invocation(instr, &macros)?;
+                let expanded = expand_invocation(instr, &macros, &mut next_id)?;
                 output.extend(expanded);
             }
             _ => output.push(stmt.clone()),
@@ -140,7 +141,7 @@ fn parse_macro_header(args: &[Operand], line: usize) -> Result<(String, Vec<Stri
     Ok((name, params))
 }
 
-fn expand_invocation(instr: &Instruction, macros: &HashMap<String, MacroDef>) -> Result<Vec<Statement>, AssembleError> {
+fn expand_invocation(instr: &Instruction, macros: &HashMap<String, MacroDef>, id: &mut usize) -> Result<Vec<Statement>, AssembleError> {
     let macro_def = macros.get(&instr.name)
         .ok_or_else(|| AssembleError::UnknownMacro(instr.line, instr.name.clone()))?;
 
@@ -153,50 +154,85 @@ fn expand_invocation(instr: &Instruction, macros: &HashMap<String, MacroDef>) ->
         ));
     }
 
+    // substitution map for params -> operands
     let mut subst = HashMap::new();
     for (param, arg) in macro_def.params.iter().zip(instr.operands.iter()) {
         subst.insert(param.clone(), arg.clone());
     }
 
+    // unique expansion suffix
+    *id += 1;
+    let suffix = format!("__m{}", id);
+
+    // collect all labels
+    let labels: Vec<String> = macro_def.body.iter()
+        .filter_map(|stmt| {
+            match stmt {
+                Statement::Label(name) => {
+                    Some(name.clone())
+                }
+                Statement::Directive(_, name, args) if name == "label" => {
+                    if let Some(op) = args.get(0).map(|op| &op.value) {
+                        if let OperandValue::Ident(s) = op {
+                            Some(s.clone())
+                        } else { None }
+                    } else { None }
+                }
+                _ => None
+            }
+        })
+        .collect();
+
+    // substitution map for old_label -> mangled_label
+    let mut label_map = HashMap::new();
+    for lbl in &labels {
+        label_map.insert(lbl.clone(), format!("{}{}", lbl, suffix));
+    }
+
+    // expand the body and substitude params and labels
     let mut expanded_body = Vec::new();
     for stmt in &macro_def.body {
-        expanded_body.push(substitute_operands(stmt.clone(), &subst)?);
+        expanded_body.push(substitute_operands(stmt.clone(), &subst, &label_map)?);
     }
 
     Ok(expanded_body)
 }
 
-fn substitute_operands(stmt: Statement, subst: &HashMap<String, Operand>) -> Result<Statement, AssembleError> {
+fn substitute_operands(stmt: Statement, subst: &HashMap<String, Operand>, label_map: &HashMap<String, String>) -> Result<Statement, AssembleError> {
     Ok(match stmt {
         Statement::Instruction(Instruction { name, mut operands, line }) => {
             for op in &mut operands {
-                *op = substitute_operand(op.clone(), subst, line)?;
+                *op = substitute_operand(op.clone(), subst, label_map, line)?;
             }
             Statement::Instruction(Instruction { name, operands, line })
         }
         Statement::Directive(line, name, mut args) => {
             for op in &mut args {
-                *op = substitute_operand(op.clone(), subst, line)?;
+                *op = substitute_operand(op.clone(), subst, label_map, line)?;
             }
             Statement::Directive(line, name, args)
         }
         Statement::Label(lbl) => {
-            Statement::Label(lbl)
+            Statement::Label(label_map.get(&lbl).cloned().unwrap_or(lbl))
         }
     })
 }
 
-fn substitute_operand(op: Operand, subst: &HashMap<String, Operand>, line: usize) -> Result<Operand, AssembleError> {
-    match op.value {
+fn substitute_operand(op: Operand, subst: &HashMap<String, Operand>, label_map: &HashMap<String, String>, line: usize) -> Result<Operand, AssembleError> {
+    Ok(match op.value {
         OperandValue::MacroParam(s) => {
             if subst.contains_key(&s) {
-                Ok(subst[&s].clone())
+                subst[&s].clone()
             } else {
-                Err(AssembleError::UnknownSymbol(line, s))
+                return Err(AssembleError::UnknownSymbol(line, s));
             }
         }
-        _ => Ok(op)
-    }
+        OperandValue::Ident(ref s) if label_map.contains_key(s) => Operand {
+            value: OperandValue::Ident(label_map[s].clone()),
+            resolved_type: op.resolved_type,
+        },
+        _ => op
+    })
 }
 
 // symbol resolution
