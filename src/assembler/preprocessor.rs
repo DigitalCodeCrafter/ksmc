@@ -57,6 +57,8 @@ pub enum AddressKind {
 
 pub fn semantic_analysis(mut stmts: Vec<Statement>, logger: &Logger) -> Result<Vec<Instruction>, AssembleError> {
 
+    stmts = expand_macros(&stmts)?;
+
     resolve_symbols(&mut stmts, logger)?;
 
     type_check(&mut stmts, logger)?;
@@ -69,6 +71,132 @@ pub fn semantic_analysis(mut stmts: Vec<Statement>, logger: &Logger) -> Result<V
     }
 
     Ok(instructions)
+}
+
+// Macros
+
+struct MacroDef {
+    name: String,
+    params: Vec<String>,
+    body: Vec<Statement>
+}
+
+fn expand_macros(stmts: &[Statement]) -> Result<Vec<Statement>, AssembleError> {
+    let mut macros = HashMap::new();
+    let mut output = Vec::new();
+    let mut iter = stmts.iter().peekable();
+
+    while let Some(stmt) = iter.next() {
+        match stmt {
+            Statement::Directive(line, name, args) if name == "macro" => {
+                let macro_def = collect_macro(&mut iter, args, *line)?;
+                macros.insert(macro_def.name.clone(), macro_def);
+            }
+            Statement::Instruction(instr) if macros.contains_key(&instr.name) => {
+                let expanded = expand_invocation(instr, &macros)?;
+                output.extend(expanded);
+            }
+            _ => output.push(stmt.clone()),
+        }
+    }
+
+    Ok(output)
+}
+
+fn collect_macro<'a, I: Iterator<Item = &'a Statement>>(iter: &mut std::iter::Peekable<I>, header_args: &[Operand], line: usize) -> Result<MacroDef, AssembleError> {
+    let (name, params) = parse_macro_header(header_args, line)?;
+
+    let mut body = Vec::new();
+    while let Some(stmt) = iter.next() {
+        match stmt {
+            Statement::Directive(_, dname, _) if dname == "endm" => {
+                return Ok(MacroDef { name, params, body });
+            }
+            _ => body.push(stmt.clone()),
+        }
+    }
+
+    Err(AssembleError::UnterminatedMacro(line))
+}
+
+fn parse_macro_header(args: &[Operand], line: usize) -> Result<(String, Vec<String>), AssembleError> {
+    if args.is_empty() {
+        return Err(AssembleError::IncorrectArgumentCount(line, ".macro".into(), 1, 0));
+    }
+
+    let name = match &args[0].value {
+        OperandValue::Ident(id) => id.clone(),
+        _ => return Err(AssembleError::ExpectedIdentifier(line))
+    };
+
+    let params = args.iter()
+        .skip(1)
+        .filter_map(|op| match &op.value {
+            OperandValue::MacroParam(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+
+    Ok((name, params))
+}
+
+fn expand_invocation(instr: &Instruction, macros: &HashMap<String, MacroDef>) -> Result<Vec<Statement>, AssembleError> {
+    let macro_def = macros.get(&instr.name)
+        .ok_or_else(|| AssembleError::UnknownMacro(instr.line, instr.name.clone()))?;
+
+    if macro_def.params.len() != instr.operands.len() {
+        return Err(AssembleError::IncorrectArgumentCount(
+            instr.line, 
+            instr.name.clone(), 
+            macro_def.params.len(), 
+            instr.operands.len()
+        ));
+    }
+
+    let mut subst = HashMap::new();
+    for (param, arg) in macro_def.params.iter().zip(instr.operands.iter()) {
+        subst.insert(param.clone(), arg.clone());
+    }
+
+    let mut expanded_body = Vec::new();
+    for stmt in &macro_def.body {
+        expanded_body.push(substitute_operands(stmt.clone(), &subst)?);
+    }
+
+    Ok(expanded_body)
+}
+
+fn substitute_operands(stmt: Statement, subst: &HashMap<String, Operand>) -> Result<Statement, AssembleError> {
+    Ok(match stmt {
+        Statement::Instruction(Instruction { name, mut operands, line }) => {
+            for op in &mut operands {
+                *op = substitute_operand(op.clone(), subst, line)?;
+            }
+            Statement::Instruction(Instruction { name, operands, line })
+        }
+        Statement::Directive(line, name, mut args) => {
+            for op in &mut args {
+                *op = substitute_operand(op.clone(), subst, line)?;
+            }
+            Statement::Directive(line, name, args)
+        }
+        Statement::Label(lbl) => {
+            Statement::Label(lbl)
+        }
+    })
+}
+
+fn substitute_operand(op: Operand, subst: &HashMap<String, Operand>, line: usize) -> Result<Operand, AssembleError> {
+    match op.value {
+        OperandValue::MacroParam(s) => {
+            if subst.contains_key(&s) {
+                Ok(subst[&s].clone())
+            } else {
+                Err(AssembleError::UnknownSymbol(line, s))
+            }
+        }
+        _ => Ok(op)
+    }
 }
 
 // symbol resolution
@@ -88,13 +216,13 @@ fn resolve_symbols(stmts: &mut [Statement], logger: &Logger) -> Result<(), Assem
     for stmt in stmts.iter() {
         match stmt {
             Statement::Label(name) => {
-                symbols.insert(name.clone(), Symbol::Label(offset));
                 logger.log(3, format!("[symbols] Found label '{}' with offset: {}", name, offset));
+                symbols.insert(name.clone(), Symbol::Label(offset));
             }
 
             Statement::Directive(line, name, args) if name == "const" => {
                 if args.len() != 3 {
-                    return Err(AssembleError::InvalidDirective(*line, "const".into()));
+                    return Err(AssembleError::IncorrectArgumentCount(*line, "const".into(), 3, args.len()));
                 }
                 let OperandValue::TypeDirective(td) = &args[0].value else { return Err(AssembleError::InvalidDirective(*line, "const".into())); };
                 let OperandValue::Ident(id) = &args[1].value else { return Err(AssembleError::InvalidDirective(*line, "const".into())); };
@@ -103,6 +231,15 @@ fn resolve_symbols(stmts: &mut [Statement], logger: &Logger) -> Result<(), Assem
                 type_cast(&mut operand, ty, *line)?;
                 logger.log(3, format!("[symbols] Found constant '{}' of type '{:?}' with value: {:?}", name, ty, operand.value));
                 symbols.insert(id.clone(), Symbol::Const(operand));
+            }
+
+            Statement::Directive(line, name, args) if name == "label" => {
+                if args.len() != 1 {
+                    return Err(AssembleError::IncorrectArgumentCount(*line, "label".into(), 1, args.len()));
+                }
+                let OperandValue::Ident(id) = &args[0].value else { return Err(AssembleError::InvalidDirective(*line, "const".into())); };
+                logger.log(3, format!("[symbols] Found label '{}' with offset: {:?}", name, offset));
+                symbols.insert(id.clone(), Symbol::Label(offset));
             }
 
             // add more here later
@@ -151,48 +288,47 @@ fn resolve_symbols(stmts: &mut [Statement], logger: &Logger) -> Result<(), Assem
                     }
                 }
                 OperandValue::Ident(name) => {
-                    if let Some(symbol) = symbols.get(name) {
-                        // Don't allow type casting on symbols
-                        if let Some(ty) = last_td_type {
-                            return Err(AssembleError::InvalidTypeCast(instr.line, op.value.clone(), ty));
-                        }
-                        match symbol {
-                            Symbol::Const(val) => {
-                                // don't allow addressing specification on constants
-                                if let Some(ak) = last_td_ak {
-                                    return Err(AssembleError::InvalidAddresKind(instr.line, ak));
-                                }
-                                logger.log(3, format!("[symbols] Resolved Constant '{}'", name));
-                                *op = val.clone();
+                    let Some(symbol) = symbols.get(name) else { return Err(AssembleError::UnknownSymbol(instr.line, name.clone())); };
+                    // Don't allow type casting on symbols
+                    if let Some(ty) = last_td_type {
+                        return Err(AssembleError::InvalidTypeCast(instr.line, op.value.clone(), ty));
+                    }
+                    match symbol {
+                        Symbol::Const(val) => {
+                            // don't allow addressing specification on constants
+                            if let Some(ak) = last_td_ak {
+                                return Err(AssembleError::InvalidAddresKind(instr.line, ak));
                             }
-                            Symbol::Label(pos) => {
-                                let addressing_kind = match (last_td_ak, needed_ak) {
-                                    (Some(AddressKind::Absolute), Some(AddressKind::Relative)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::Absolute)),
-                                    (Some(AddressKind::Relative), Some(AddressKind::Absolute)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::Relative)),
-                                    (Some(AddressKind::RelativeNext), Some(AddressKind::Absolute)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::RelativeNext)),
-                                    (Some(ak), _) => ak,
-                                    (None, Some(ak)) => ak,
-                                    (None, None) => return Err(AssembleError::UnableToInferr(instr.line)),
-                                };
-                                match addressing_kind {
-                                    AddressKind::Absolute => {
-                                        logger.log(3, format!("[symbols] Resolved Label '{}' with absolute position: {}", name, *pos as i32 ));
-                                        *op = Operand { value: OperandValue::Int(*pos as i32), resolved_type: Some(ValueType::Int32) }
-                                    }
-                                    AddressKind::Relative => {
-                                        logger.log(3, format!("[symbols] Resolved Label '{}', with relative position: {:+}", name, *pos as i32 - offset as i32));
-                                        *op = Operand {
-                                            value: OperandValue::Int(*pos as i32 - offset as i32),
-                                            resolved_type: Some(ValueType::Int32)
-                                        };
-                                    }
-                                    AddressKind::RelativeNext => {
-                                        logger.log(3, format!("[symbols] Resolved Label '{}', with relative position: {:+}", name, *pos as i32 - offset as i32 - 1));
-                                        *op = Operand {
-                                            value: OperandValue::Int(*pos as i32 - offset as i32 - 1),
-                                            resolved_type: Some(ValueType::Int32)
-                                        };
-                                    }
+                            logger.log(3, format!("[symbols] Resolved Constant '{}'", name));
+                            *op = val.clone();
+                        }
+                        Symbol::Label(pos) => {
+                            let addressing_kind = match (last_td_ak, needed_ak) {
+                                (Some(AddressKind::Absolute), Some(AddressKind::Relative)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::Absolute)),
+                                (Some(AddressKind::Relative), Some(AddressKind::Absolute)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::Relative)),
+                                (Some(AddressKind::RelativeNext), Some(AddressKind::Absolute)) => return Err(AssembleError::InvalidAddresKind(instr.line, AddressKind::RelativeNext)),
+                                (Some(ak), _) => ak,
+                                (None, Some(ak)) => ak,
+                                (None, None) => return Err(AssembleError::UnableToInferr(instr.line)),
+                            };
+                            match addressing_kind {
+                                AddressKind::Absolute => {
+                                    logger.log(3, format!("[symbols] Resolved Label '{}' with absolute position: {}", name, *pos as i32 ));
+                                    *op = Operand { value: OperandValue::Int(*pos as i32), resolved_type: Some(ValueType::Int32) }
+                                }
+                                AddressKind::Relative => {
+                                    logger.log(3, format!("[symbols] Resolved Label '{}', with relative position: {:+}", name, *pos as i32 - offset as i32));
+                                    *op = Operand {
+                                        value: OperandValue::Int(*pos as i32 - offset as i32),
+                                        resolved_type: Some(ValueType::Int32)
+                                    };
+                                }
+                                AddressKind::RelativeNext => {
+                                    logger.log(3, format!("[symbols] Resolved Label '{}', with relative position: {:+}", name, *pos as i32 - offset as i32 - 1));
+                                    *op = Operand {
+                                        value: OperandValue::Int(*pos as i32 - offset as i32 - 1),
+                                        resolved_type: Some(ValueType::Int32)
+                                    };
                                 }
                             }
                         }
@@ -315,9 +451,6 @@ fn infer_best_type(op: &OperandValue, allowed: &OperandTypeSet, line: usize) -> 
             (OperandValue::ArgMarker, ArgMarker) => matches.push(ArgMarker),
             (OperandValue::Ident(name), ArgMarker) if name.eq_ignore_ascii_case("argmarker") => matches.push(ArgMarker),
 
-            // Identifiers as lables...
-            (OperandValue::Ident(_), String) => matches.push(String),
-
             _ => {}
         }
     }
@@ -334,6 +467,7 @@ fn infer_best_type(op: &OperandValue, allowed: &OperandTypeSet, line: usize) -> 
             // These shouldn't exist anymore.
             OperandValue::Ident(_) => ValueType::Null,
             OperandValue::TypeDirective(_) => ValueType::Null,
+            OperandValue::MacroParam(_) => ValueType::Null,
         }, allowed.0))
     } else {
         let preceedence = [

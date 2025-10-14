@@ -1,4 +1,4 @@
-use super::{lexer::{Token, TokenType}, semantics::ValueType, AssembleError};
+use super::{lexer::{Token, TokenType}, preprocessor::ValueType, AssembleError};
 use crate::Logger;
 
 #[derive(Debug, Clone)]
@@ -11,6 +11,7 @@ pub enum OperandValue {
     ArgMarker,
     Null,
     TypeDirective(String),
+    MacroParam(String),
 }
 
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ pub struct Instruction {
     pub line: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Statement {
     Instruction(Instruction),
     Label(String),
@@ -194,6 +195,11 @@ impl Parser {
                     let s = self.expect_ident()?;
                     ops.push(OperandValue::TypeDirective(s));
                     is_td = true;
+                }
+                TokenType::MacroParam => {
+                    self.pos += 1;
+                    let s = self.expect_ident()?;
+                    ops.push(OperandValue::MacroParam(s));
                 }
                 _ => break,
             }

@@ -14,6 +14,7 @@ pub enum TokenType {
     Whitespace,             // ' '
     Hash,                   // #
     At,                     // @
+    MacroParam,             // $
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +88,7 @@ impl Lexer {
             '.' if !matches!(self.peek(), Some('0'..='9')) => return Some(Ok(Token { kind: TokenType::Dot, line: self.line })),
             '#' => return Some(Ok(Token { kind: TokenType::Hash, line: self.line })),
             '@' => return Some(Ok(Token { kind: TokenType::At, line: self.line })),
+            '$' => return Some(Ok(Token { kind: TokenType::MacroParam, line: self.line })),
             '\n' => {
                 self.line += 1;
                 return Some(Ok(Token { kind: TokenType::NewLine, line: self.line }))

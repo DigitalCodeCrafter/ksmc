@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{get_opcode_signature, parser::{Instruction, OperandValue}, semantics::ValueType, AssembleError};
+use super::{get_opcode_signature, parser::{Instruction, OperandValue}, preprocessor::ValueType, AssembleError};
 use crate::Logger;
 
 

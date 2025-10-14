@@ -4,28 +4,28 @@ use flate2::{write::GzEncoder, Compression};
 
 use lexer::TokenType;
 use parser::{Instruction, OperandValue};
-use semantics::{AddressKind, ValueType};
+use preprocessor::{AddressKind, ValueType};
 use crate::Logger;
 
-// preprocessor []
-// - macros             []
 // lexer        [X]
 // parser       [X]
-// semantics    [X]
-// - type checking      [X]
-// - symbol resolution  [X]
+// preprocessor [/]
+// - macros             []
 // - directives         [X]
+// - symbol resolution  [X]
+// - type checking      [X]
 // encoder      [X]
 
 mod lexer;
 mod parser;
-mod semantics;
+mod preprocessor;
 mod encoder;
 
 #[derive(Debug)]
 pub enum AssembleError {
     InvalidEscapeCharacter(usize, char),
     UnterminatedString(usize),
+    UnterminatedMacro(usize),
     MultimpleDecimalPoints(usize),
     UnexpectedChar(usize, char),
     ExpectedIdentifier(usize),
@@ -42,6 +42,8 @@ pub enum AssembleError {
     InvalidTypeSpecifier(usize, String),
     UnresolvedSymbol(usize, String),
     UnknownInstruction(Instruction),
+    UnknownSymbol(usize, String),
+    UnknownMacro(usize, String),
     UnableToInferr(usize),
     FileIO(io::Error)
 }
@@ -51,6 +53,7 @@ impl Display for AssembleError {
         match self {
             InvalidEscapeCharacter(line, char)   => write!(f, "Error: Invalid Escape Character '\\{char}' in line {line}!"),
             UnterminatedString(line)                    => write!(f, "Error: The String beginning line {line} is missing termination '\"' !"),
+            UnterminatedMacro(line)                     => write!(f, "Error: The Macro in line {line} is never terminated using '.endm'!"),
             MultimpleDecimalPoints(line)                => write!(f, "Error: Tried to use multiple decimal points in the float on line {line}!"),
             UnexpectedChar(line, char)           => write!(f, "Error: Unexpected Character '{char}' in line {line}"),
             ExpectedIdentifier(line)                    => write!(f, "Error: Expected an identifier in line {line}"),
@@ -60,6 +63,8 @@ impl Display for AssembleError {
             UnexpectedEOF                                       => write!(f, "Error: Unexptected End Of File"),
             InvalidDirective(line, dir)        => write!(f, "Error: The directive '.{dir}' in line {line} does not exist or was used incorrectly!"),
             UnknownInstruction(instr)             => write!(f, "Error: Unknown instruction '{}' in line {}!", instr.name, instr.line),
+            UnknownSymbol(line, name)          => write!(f, "Error: Unknown Symbol '{name}' in line {line}"),
+            UnknownMacro(line, name)           => write!(f, "Error: Unknown Macro '{name}' in line {line}"),
             InvalidTypeSpecifier(line, spec)   => write!(f, "Error: Invalid type specifier '.{spec}' for argument in line {line}!"),
             UnresolvedSymbol(line, name)       => write!(f, "Error: Unresolved symbol '{name}' in line {line}!"),
             UnableToInferr(line)                        => write!(f, "Error: Unable to inferr type / address kind of argument in line {line}!"),
@@ -181,7 +186,7 @@ pub fn assemble<P: AsRef<Path>, O: AsRef<Path>>(input_path: P, output_path: O, l
     let mut parser = parser::Parser::new(tokens);
     let statements = parser.parse_all(logger)?;
 
-    let instructions = semantics::semantic_analysis(statements, logger)?;
+    let instructions = preprocessor::semantic_analysis(statements, logger)?;
 
     let output = encoder::encode(&instructions, logger)?;
     compress(output_path, &output).map_err(|e| AssembleError::FileIO(e))?;
