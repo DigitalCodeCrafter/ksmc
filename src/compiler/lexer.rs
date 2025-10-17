@@ -1,0 +1,426 @@
+use crate::compiler::{ast::{Pos, Span}, CResult, CompilerError};
+
+
+const CASE_SENSITIVITY: bool = true;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenKind {
+    // Identifiers and Literals
+    Identifier(String),
+    Int(i32),
+    Float(f64),
+    String(String),
+    Bool(bool),
+
+    // Keywords
+    Let,
+    Mut,
+    Fn,
+    If,
+    Else,
+    While,
+    Return,
+
+    // Operators
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Slash,      // /
+    Eq,         // =
+    EqEq,       // ==
+    NotEq,      // !=
+    Lt,         // <
+    LtEq,       // <=
+    Gt,         // >
+    GtEq,       // >=
+    AndAnd,     // &&
+    OrOr,       // ||
+    Not,        // !
+    PlusEq,     // +=
+    MinusEq,    // -=
+    StarEq,     // *=
+    SlashEq,    // /=
+    Dot,        // .
+    Arrow,      // ->
+
+    // Delimiters
+    LParen,     // (
+    RParen,     // )
+    LBrace,     // {
+    RBrace,     // }
+    LBracket,   // [
+    RBracket,   // ]
+    Comma,      // ,
+    Colon,      // :
+    Semi,       // ;
+
+    // Misc
+    EOF,
+}
+
+#[derive(Debug, Clone)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+pub struct Lexer {
+    src: Vec<char>,
+    pos: usize,
+    line: usize,
+    col: usize,
+}
+impl Lexer {
+    pub fn new(input: &str) -> Self {
+        Self {
+            src: input.chars().collect(),
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
+    }
+
+    pub fn lex_all(&mut self) -> CResult<Vec<Token>> {
+        let mut tokens = Vec::new();
+        loop {
+            let tok = self.next_token()?;
+            if matches!(tok.kind, TokenKind::EOF) {
+                tokens.push(tok); break;
+            } else {
+                tokens.push(tok);
+            }
+        }
+        Ok(tokens)
+    }
+
+    pub fn next_token(&mut self) -> CResult<Token> {
+        self.skip_whitespace_and_comment();
+
+        let start_line = self.line;
+        let start_col = self.col;
+
+        let Some(c) = self.peek() else {
+            return Ok(self.make_token(TokenKind::EOF, start_line, start_col));
+        };
+
+        Ok(if c.is_alphabetic() {
+            self.lex_identifier_or_keyword(start_line, start_col)
+        } else if c.is_ascii_digit() {
+            self.lex_number(start_line, start_col)
+        } else if c == '"' {
+            self.lex_string(start_line, start_col)?
+        } else {
+            self.lex_symbol(start_line, start_col)?
+        })
+    }
+
+    fn make_token(&self, kind: TokenKind, line: usize, col: usize) -> Token {
+        Token { kind, span: Span { start: Pos { line, col }, end: Pos { line: self.line, col: self.col } }}
+    }
+
+    // --------- Iteration ---------
+
+    fn peek(&self) -> Option<char> {
+        self.src.get(self.pos).copied()
+    }
+    
+    fn peek_ahead(&self, n: usize) -> Option<char> {
+        self.src.get(self.pos + n).copied()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += 1;
+        if c == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(c)
+    }
+
+    fn match_next(&mut self, expected: char) -> bool {
+        if self.peek() == Some(expected) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    // --------- Skipping whitespaces & comments ---------
+
+    fn skip_whitespace_and_comment(&mut self) {
+        loop {
+            match self.peek() {
+                Some(c) if c.is_whitespace() => { self.advance(); }
+                Some('/') if self.peek_ahead(1) == Some('/') =>  {
+                    while let Some(c) = self.peek() {
+                        self.advance();
+                        if c == '\n' { break; }
+                    }
+                }
+                Some('/') if self.peek_ahead(1) == Some('*') => {
+                    self.advance(); self.advance(); // consume "/*"
+                    while !(self.peek() == Some('*') && self.peek_ahead(1) == Some('/')) {
+                        if self.advance().is_none() { break; }
+                    }
+                    self.advance(); self.advance(); // consume "*/"
+                }
+                _ => break,
+            }
+        }
+    }
+
+    // --------- Identifiers & Keywords ---------
+
+    fn lex_identifier_or_keyword(&mut self, line: usize, col: usize) -> Token {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if c.is_alphanumeric() || c == '_' {
+                s.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if !CASE_SENSITIVITY {
+            s.make_ascii_lowercase();
+        }
+        
+        let kind = match s.as_str() {
+            "let" => TokenKind::Let,
+            "mut" => TokenKind::Mut,
+            "fn" => TokenKind::Fn,
+            "if" => TokenKind::If,
+            "else" => TokenKind::Else,
+            "while" => TokenKind::While,
+            "return" => TokenKind::Return,
+            "true" => TokenKind::Bool(true),
+            "false" => TokenKind::Bool(false),
+            _ => TokenKind::Identifier(s),
+        };
+
+        self.make_token(kind, line, col)
+    }
+
+    // --------- Numbers ---------
+
+    fn lex_number(&mut self, line: usize, col: usize) -> Token {
+        let mut num_str = String::new();
+        let mut has_dot = false;
+        let mut has_exp = false;
+
+        // prefixes
+        if self.peek() == Some('0') {
+            if let Some(next) = self.peek_ahead(1) {
+                match next {
+                    'x' | 'X' => {
+                        self.advance(); self.advance(); // consume "0x"
+                        return self.lex_based_number(16, line, col);
+                    }
+                    'b' | 'B' => {
+                        self.advance(); self.advance(); // consume "0b"
+                        return self.lex_based_number(2, line, col);
+                    }
+                    'o' | 'O' => {
+                        self.advance(); self.advance(); // consume "0o"
+                        return self.lex_based_number(8, line, col);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // decimal or floating        
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() || c == '_' {
+                num_str.push(c);
+                self.advance();
+            } else if c == '.' && !has_dot && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
+                has_dot = true;
+                num_str.push(c);
+                self.advance();
+            } else if (c == 'e' || c == 'E') && !has_exp {
+                if let Some(next) = self.peek_ahead(1) {
+                    if next.is_ascii_digit() {
+                        num_str.push(c);
+                        self.advance();
+                        has_exp = true;
+                    } else if (next == '+' || next == '-') && self.peek_ahead(2).map_or(false, |n| n.is_ascii_digit()) {
+                        num_str.push(c);
+                        self.advance();
+                        num_str.push(next);
+                        self.advance();
+                        has_exp = true;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        let cleaned = num_str.replace("_", "");
+        let kind = if has_dot || has_exp {
+            TokenKind::Float(cleaned.parse().unwrap_or(0.0))
+        } else {
+            TokenKind::Int(cleaned.parse().unwrap_or(0))
+        };
+
+        self.make_token(kind, line, col)
+    }
+
+    fn lex_based_number(&mut self, base: u32,line: usize, col: usize) -> Token {
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            match c {
+                '_' => {
+                    s.push(c);
+                    self.advance();
+                }
+                '0'..='1' if base >= 2 => {
+                    s.push(c);
+                    self.advance();
+                }
+                '2'..='7' if base >= 8 => {
+                    s.push(c);
+                    self.advance();
+                }
+                '8'..='9' | 'A'..='F' | 'a'..='f' if base >= 16 => {
+                    s.push(c);
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+
+        let cleaned = s.replace("_", "");
+        let value = i32::from_str_radix(&cleaned, base).unwrap_or(0);
+        self.make_token(TokenKind::Int(value), line, col)
+    }
+
+    // --------- Strings ---------
+
+    fn lex_string(&mut self, line: usize, col: usize) -> CResult<Token> {
+        self.advance(); // consume '"'
+        let mut s = String::new();
+
+        loop {
+            match self.advance() {
+                None => return Err(CompilerError::LexerUnterminatedString { line, col }),
+                Some('"') => break,
+                Some('\\') => {
+                    if let Some(escaped) = self.advance() {
+                        match escaped {
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            '"' => s.push('"'),
+                            '\\' => s.push('\\'),
+                            '\r' if self.peek() == Some('\n') => { self.advance(); }
+                            '\r' => {},
+                            '\n' => {},
+                            _ => s.push(escaped),
+                        }
+                    }
+                }
+                Some(c) => s.push(c),
+            }
+        }
+
+        Ok(self.make_token(TokenKind::String(s), line, col))
+    }
+
+    // --------- Symbols & Operators ---------
+
+    fn lex_symbol(&mut self, line: usize, col: usize) -> CResult<Token> {
+        use TokenKind::*;
+        let c = self.advance().unwrap();
+
+        let kind = match c {
+            '+' if self.match_next('=') => PlusEq,
+            '+' => Plus,
+            '-' if self.match_next('>') => Arrow,
+            '-' if self.match_next('=') => MinusEq,
+            '-' => Minus,
+            '*' if self.match_next('=') => StarEq,
+            '*' => Star,
+            '/' if self.match_next('=') => SlashEq,
+            '/' => Slash,
+            '=' if self.match_next('=') => EqEq,
+            '=' => Eq,
+            '!' if self.match_next('=') => NotEq,
+            '!' => Not,
+            '<' if self.match_next('=') => LtEq,
+            '<' => Lt,
+            '>' if self.match_next('=') => GtEq,
+            '>' => Gt,
+            '&' if self.match_next('&') => AndAnd,
+            '|' if self.match_next('|') => OrOr,
+            '(' => LParen,
+            ')' => RParen,
+            '{' => LBrace,
+            '}' => RBrace,
+            '[' => LBracket,
+            ']' => RBracket,
+            ',' => Comma,
+            ';' => Semi,
+            ':' => Colon,
+            '.' => Dot,
+            _ => return Err(CompilerError::LexerUnexpectedChar { line, col, c }),
+        };
+
+        Ok(self.make_token(kind, line, col))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lexing_1() {
+        let src = r#"
+            let x = 3.14;
+            if x > 1.0 { print("ok"); }
+        "#;
+        let expected = vec![
+            TokenKind::Let, TokenKind::Identifier("x".into()), TokenKind::Eq, TokenKind::Float(3.14), TokenKind::Semi,
+            TokenKind::If, TokenKind::Identifier("x".into()), TokenKind::Gt, TokenKind::Float(1.0), TokenKind::LBrace,
+            TokenKind::Identifier("print".into()), TokenKind::LParen, TokenKind::String("ok".to_string()), TokenKind::RParen, TokenKind::Semi,
+            TokenKind::RBrace, TokenKind::EOF,
+        ];
+
+        let mut lexer = Lexer::new(src);
+        let mut i = 0;
+        loop {
+            let tok = lexer.next_token().unwrap();
+            println!("{:?}", tok);
+            assert_eq!(tok.kind, expected[i]);
+            if matches!(tok.kind, TokenKind::EOF) { break; }
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn test_lexing_numbers() {
+        let src = r#"
+        1_23 3.14 1e-3 0b1010 0o755 0xFFAA
+        "#;
+
+        let expected = vec![
+            TokenKind::Int(123), TokenKind::Float(3.14), TokenKind::Float(0.001), TokenKind::Int(10), TokenKind::Int(493), TokenKind::Int(65450),
+            TokenKind::EOF,
+        ];
+        let mut lexer = Lexer::new(src);
+        let mut i = 0;
+        loop {
+            let tok = lexer.next_token().unwrap();
+            println!("{:?}", tok);
+            assert_eq!(tok.kind, expected[i]);
+            if matches!(tok.kind, TokenKind::EOF) { break; }
+            i += 1;
+        }
+    }
+}

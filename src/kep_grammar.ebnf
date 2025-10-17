@@ -1,0 +1,77 @@
+
+Program         = { Item };
+
+(* imports, structs, and enums later *)
+Item            = FunctionDecl;
+
+(* generics later *)
+FunctionDecl    = "fn", Identifier, "(", [ FunctionParams ], ")", [ "->", Type ], BlockExpression;
+
+(* self param later *)
+FunctionParams  = FunctionParam, { ",", FunctionParam }, [","];
+FunctionParam   = Identifier, ":", Type;
+
+BlockExpression = "{", { Statement }, [ Expression ], "}";
+
+Statement       = ";"
+                | Item
+                | LetStatement
+                | ExpressionStatement ;
+
+LetStatement    = "let", [ "mut" ], Identifier, "=", Expression, ";" ;
+
+ExpressionStatement = Expression, ";" ;
+
+(* Expressions *)
+
+Expression      = LiteralExpression
+                | OperationExpression
+                | GroupedExpression
+                | CallExpression
+                | ReturnExpression
+                | UnderscoreExpression
+                | IfExpression ;
+
+LiteralExpression = STRING | INT | FLOAT | "true" | "false";
+
+OperationExpression = ArithmeticExpression
+                    | NegationExpression
+                    | ComparisonExpression
+                    | LazyBooleanExpression
+                    | AssignmentExpression;
+
+ArithmeticExpression = Expression, ( "+" | "-" | "*" | "/" ), Expression;
+
+NegationExpression = ( "-" | "!" ), Expression;
+
+ComparisonExpression = Expression, ( "==" | "!=" | ">" | "<" | ">=" | "<=" ), Expression;
+
+LazyBooleanExpression = Expression, ( "||" | "&&" ), Expression;
+
+AssignmentExpression = Expression, ("="), Expression;
+
+
+GroupedExpression = "(", Expression, ")";
+
+CallExpression  = Expression, "(", [ CallParams ], ")";
+CallParams      = Expression, { ",", Expression }, [","];
+
+ReturnExpression = "return", [ Expression ];
+
+UnderscoreExpression = "_";
+
+IfExpression    = "if", Expression, BlockExpression, [ "else", ( BlockExpression | IfExpression ) ];
+
+(* Types *)
+Type            = FunctionType | ArrayType | TupleType | GenericType | SimpleType;
+
+SimpleType      = Identifier;
+
+GenericType     = Identifier, "<", TypeList, ">";
+TypeList        = Type, { ",", Type }, [","];
+
+ArrayType       = "[", Type, [ ";", INT ], "]";
+
+TupleType       = "(", Type, { ",", Type }, [","], ")";
+
+FunctionType    = "fn", "(", [ TypeList ], ")", "->", Type ;
