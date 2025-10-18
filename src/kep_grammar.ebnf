@@ -30,7 +30,9 @@ Expression      = LiteralExpression
                 | CallExpression
                 | ReturnExpression
                 | UnderscoreExpression
-                | IfExpression ;
+                | IfExpression
+                | ArrayExpressions
+                | TupleExpressions ;
 
 LiteralExpression = STRING | INT | FLOAT | "true" | "false";
 
@@ -50,7 +52,6 @@ LazyBooleanExpression = Expression, ( "||" | "&&" ), Expression;
 
 AssignmentExpression = Expression, ("="), Expression;
 
-
 GroupedExpression = "(", Expression, ")";
 
 CallExpression  = Expression, "(", [ CallParams ], ")";
@@ -62,16 +63,23 @@ UnderscoreExpression = "_";
 
 IfExpression    = "if", Expression, BlockExpression, [ "else", ( BlockExpression | IfExpression ) ];
 
+ArrayExpression = "[", [ ArrayElements ], "]" ;
+ArrayElements = Expression, ";", Expression
+              | Expression, { ",", Expression }, [ "," ];
+
+TupleExpression = "(", TupleElements, ")";
+TupleElements = Expression, ",", { Expression, "," }, [ Expression ];
+
 (* Types *)
 Type            = FunctionType | ArrayType | TupleType | GenericType | SimpleType;
 
-SimpleType      = Identifier;
+SimpleType      = Identifier
 
 GenericType     = Identifier, "<", TypeList, ">";
 TypeList        = Type, { ",", Type }, [","];
 
 ArrayType       = "[", Type, [ ";", INT ], "]";
 
-TupleType       = "(", Type, { ",", Type }, [","], ")";
+TupleType       = "(", Type, "," { Type, "," }, [ Type ], ")";
 
 FunctionType    = "fn", "(", [ TypeList ], ")", "->", Type ;
