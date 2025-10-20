@@ -13,6 +13,7 @@ use crate::Logger;
 // - macros             [X]
 // - directives         [X]
 // - symbol resolution  [X]
+// - constant eval.     [ ]
 // - type checking      [X]
 // encoder      [X]
 
