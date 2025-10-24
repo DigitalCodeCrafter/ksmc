@@ -46,9 +46,8 @@ pub enum TokenKind {
     MinusEq,    // -=
     StarEq,     // *=
     SlashEq,    // /=
-    Dot,        // .
     Arrow,      // ->
-
+    
     // Delimiters
     LParen,     // (
     RParen,     // )
@@ -61,6 +60,7 @@ pub enum TokenKind {
     ColCol,     // ::
     Semi,       // ;
     Underscore, // _
+    Dot,        // .
 
     // Misc
     EOF,
@@ -115,9 +115,9 @@ impl Lexer {
             self.lex_identifier_or_keyword(start_line, start_col)
         } else if c.is_ascii_digit() {
             self.lex_number(start_line, start_col)
-        } else if c == '.' || self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
+        } else if c == '.' && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
             self.lex_number(start_line, start_col)
-        } else if c == '-' || self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
+        } else if c == '-' && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
             self.lex_number(start_line, start_col)
         } else if c == '"' {
             self.lex_string(start_line, start_col)?

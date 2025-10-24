@@ -165,12 +165,12 @@ impl Parser {
             },
             _ => false
         };
-        
+
         match self.peek_with_span() {
             (TokenKind::Mod, _) => self.parse_module(public),
             (TokenKind::Use, _) => self.parse_use(public),
             (TokenKind::Fn, _) => self.parse_function(public),
-            (other, span) => Err(ParseError::expected(span, vec![TokenKind::Fn], other.clone())),
+            (other, span) => Err(ParseError::new(span, format!("expected item, found: {:?}", other))),
         }
     }
 
@@ -225,6 +225,7 @@ impl Parser {
     }
 
     fn parse_module(&mut self, public: bool) -> PResult<NodeId> {
+        println!("mod");
         self.start_span();
         self.expect(TokenKind::Mod)?;
 
@@ -233,13 +234,14 @@ impl Parser {
             (other, span) => return Err(ParseError::new(span, format!("expected module name, found {:?}", other))),
         };
 
-        let mut items = Vec::new();
+        let mut items = None;
 
         match self.next_with_span() {
             (TokenKind::Semi, _) => {},
             (TokenKind::LBrace, _) => {
-                while !matches!(self.peek(), TokenKind::EOF) {
-                    items.push(self.parse_item()?)
+                items = Some(Vec::new());
+                while !matches!(self.peek(), TokenKind::RBrace) {
+                    items.as_mut().unwrap().push(self.parse_item()?);
                 }
                 self.expect(TokenKind::RBrace)?;
             }
@@ -254,12 +256,51 @@ impl Parser {
         self.start_span();
         self.expect(TokenKind::Use)?;
 
-        // Use tree
-        todo!();
+        let use_tree = self.parse_use_tree()?;
 
         self.expect(TokenKind::Semi)?;
 
-        self.push_node(NodeKind::UseDecl { public })
+        self.push_node(NodeKind::UseDecl { public, use_tree })
+    }
+
+    fn parse_use_tree(&mut self) -> PResult<NodeId> {
+        self.start_span();
+
+        match self.next_with_span() {
+            (TokenKind::Star, _) => self.push_node(NodeKind::UseGlob),
+            (TokenKind::Identifier(ident), _) => {
+                let ident = ident.clone();
+
+                if matches!(self.peek(), TokenKind::ColCol) {
+                    self.next();
+                    let tree = self.parse_use_tree()?;
+                    self.push_node(NodeKind::UsePath { ident, tree })
+                } else {
+                    self.push_node(NodeKind::UseName { ident })
+                }
+            }
+            (TokenKind::LBrace, _) => {
+                let mut trees = Vec::new();
+                if !matches!(self.peek(), TokenKind::RBrace) {
+                    loop {
+                        trees.push(self.parse_use_tree()?);
+
+                        if matches!(self.peek(), TokenKind::Comma) {
+                            self.next();
+                        } else {
+                            break;
+                        }
+                        if matches!(self.peek(), TokenKind::RBrace) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RBrace)?;
+
+                self.push_node(NodeKind::UseGroup { trees })
+            }
+            (other, span) => Err(ParseError::new(span, format!("expected use path segment, found {:?}", other))),
+        }
     }
 }
 
@@ -383,12 +424,11 @@ impl Parser {
                 self.next();
                 self.push_node(kind)
             }
-            (TokenKind::Identifier(name), _) => {
-                let kind = NodeKind::Variable(name.clone());
-                self.start_span();
-                self.next();
-                self.push_node(kind)
-            }
+            
+            // Path expression
+            (TokenKind::Identifier(_), _) => self.parse_path_expression(),
+
+            // Underscore expression
             (TokenKind::Underscore, _) => {
                 self.start_span();
                 self.next();
@@ -616,6 +656,29 @@ impl Parser {
 
             (other, span) => return Err(ParseError::expected(span, vec![TokenKind::Semi, TokenKind::Comma, TokenKind::RBracket], other.clone())),
         }
+    }
+
+    fn parse_path_expression(&mut self) -> PResult<NodeId> {
+        self.start_span();
+
+        let mut segments = Vec::new();
+
+        loop {
+            self.start_span();
+            let ident = match self.next_with_span() {
+                (TokenKind::Identifier(ident), _) => ident.clone(),
+                (other, span) => return Err(ParseError::new(span, format!("expected identifier, found {:?}", other))),
+            };
+            segments.push(self.push_node(NodeKind::PathSegment { ident })?);
+
+            if matches!(self.peek(), TokenKind::ColCol) {
+                self.next();
+            } else {
+                break;
+            }
+        }
+
+        self.push_node(NodeKind::PathExpression { segments })
     }
 }
 
@@ -882,6 +945,38 @@ mod tests {
                 let mut x: [(List<Int>, Int); 3] = [(List(_), 923); 3];
                 x + 5 = x - 1;
             }
+        "#;
+
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.lex_all().unwrap();
+        
+        let mut parser = Parser::new(tokens);
+        let root = parser.parse_program().unwrap();
+
+        println!("AST Root Node ID: {:?}", root);
+        for (i, node) in parser.arena.iter().enumerate() {
+            println!("{:>2}: {:?}", i, node.kind);
+        }
+        println!("\nType Arena:");
+        for (i, ty) in parser.types.iter().enumerate() {
+            println!("{:>2}: {:?}", i, ty);
+        }
+    }
+
+    #[test]
+    fn test_parse_items() {
+        use crate::compiler::lexer::Lexer;
+
+        let src = r#"
+            mod module;
+
+            mod inlined {
+                fn test() -> () {}
+            }
+
+            use inlined::test;
+
+            use module::{self, modules::*};
         "#;
 
         let mut lexer = Lexer::new(src);

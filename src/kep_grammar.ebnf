@@ -4,6 +4,8 @@ Program         = { Item };
 (* imports, structs, and enums later *)
 Item            = ["pub"], ( FunctionDecl | Module | UseDecl );
 
+(* --------- Items ---------- *)
+
 (* generics later *)
 FunctionDecl    = "fn", Identifier, "(", [ FunctionParams ], ")", [ "->", Type ], BlockExpression;
 
@@ -11,13 +13,15 @@ Module          = "mod", Identifier, ";"
                 | "mod", Identifier, "{", { Item } ,"}";
 
 UseDecl         = "use", UseTree, ";";
-UseTree         = TODO;
+UseTree         = Identifier, { "::", UseTree }
+                | "{", UseTree, { ",", UseTree }, [ "," ], "}"
+                | "*";
 
 (* self param later *)
 FunctionParams  = FunctionParam, { ",", FunctionParam }, [","];
 FunctionParam   = Identifier, ":", Type;
 
-BlockExpression = "{", { Statement }, [ Expression ], "}";
+(* --------- Statements ---------- *)
 
 Statement       = ";"
                 | Item
@@ -28,9 +32,10 @@ LetStatement    = "let", [ "mut" ], Identifier, [ ":", Type ], "=", Expression, 
 
 ExpressionStatement = Expression, ";" ;
 
-(* Expressions *)
+(* --------- Expressions ---------- *)
 
 Expression      = LiteralExpression
+                | PathExpression
                 | OperationExpression
                 | GroupedExpression
                 | CallExpression
@@ -42,9 +47,13 @@ Expression      = LiteralExpression
                 | IndexExpression
                 | TupleExpressions
                 | TupleIndexExpression
+                | BlockExpression
                 ;
 
 LiteralExpression = STRING | INT | FLOAT | "true" | "false";
+
+PathExpression  = PathSegment, { "::", PathSegment };
+PathSegment     = Identifier;
 
 OperationExpression = ArithmeticExpression
                     | NegationExpression
@@ -86,7 +95,10 @@ TupleElements = Expression, ",", { Expression, "," }, [ Expression ];
 
 TupleIndexExpression = Expression, ".", INTEGER_LIT;
 
-(* Types *)
+BlockExpression = "{", { Statement }, [ Expression ], "}";
+
+(* --------- Types ---------- *)
+
 Type            = FunctionType | ArrayType | TupleType | GenericType | SimpleType;
 
 SimpleType      = Identifier;

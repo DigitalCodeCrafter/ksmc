@@ -7,7 +7,6 @@ pub type NodeId = usize;
 pub enum NodeKind {
     // Expressions
     Literal(Literal),
-    Variable(String),
     Unary { op: UnaryOp, expr: NodeId },
     Binary { op: BinaryOp, lhs: NodeId, rhs: NodeId },
     Call { callee: NodeId, args: Vec<NodeId> },
@@ -22,6 +21,8 @@ pub enum NodeKind {
     UnderscoreExpr,
     IndexExpression { array: NodeId , index: NodeId },
     TupleIndexExpression { tuple: NodeId , index: i32 },
+    PathExpression { segments: Vec<NodeId> },
+    PathSegment { ident: String },
     
     // Statements
     LetStmt { name: String, mutable: bool, ty: Option<TypeId>, value: Option<NodeId> },
@@ -29,8 +30,13 @@ pub enum NodeKind {
 
     // Items
     Function { public:  bool, name: String, params: Vec<(String, TypeId)>, return_type: Option<TypeId>, body: NodeId },
-    Module { public:  bool, name: String, items: Vec<NodeId> },
-    UseDecl { public:  bool,  },
+    Module { public:  bool, name: String, items: Option<Vec<NodeId>> },
+    UseDecl { public:  bool, use_tree: NodeId },
+
+    UsePath { ident: String, tree: NodeId },
+    UseGroup { trees: Vec<NodeId> },
+    UseName { ident: String },
+    UseGlob,
 
     // Program
     Program { items: Vec<NodeId> },

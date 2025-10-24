@@ -4,11 +4,16 @@
 
 - [x] Lexing
 - [x] Parsing
-- [ ] Semantics
-- [ ] Encoding
+- [ ] Expansion
+- [ ] Resolution
+- [ ] Validation
+- [ ] Type checking
+- [ ] Lowering
+- [ ] Optimization
+- [ ] Code generation
 
 ## Example
-
+todo();
 ```
 fn main() -> () {
     
