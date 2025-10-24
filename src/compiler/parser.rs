@@ -158,13 +158,23 @@ impl Parser {
 
 impl Parser {
     fn parse_item(&mut self) -> PResult<NodeId> {
+        let public = match self.peek() {
+            TokenKind::Pub => {
+                self.next();
+                true
+            },
+            _ => false
+        };
+        
         match self.peek_with_span() {
-            (TokenKind::Fn, _) => self.parse_function(),
+            (TokenKind::Mod, _) => self.parse_module(public),
+            (TokenKind::Use, _) => self.parse_use(public),
+            (TokenKind::Fn, _) => self.parse_function(public),
             (other, span) => Err(ParseError::expected(span, vec![TokenKind::Fn], other.clone())),
         }
     }
 
-    fn parse_function(&mut self) -> PResult<NodeId> {
+    fn parse_function(&mut self, public: bool) -> PResult<NodeId> {
         self.start_span();
         self.expect(TokenKind::Fn)?;
 
@@ -182,7 +192,7 @@ impl Parser {
 
         let body = self.parse_block_expression()?;
 
-        self.push_node(NodeKind::Function { name, params, return_type, body })
+        self.push_node(NodeKind::Function { public, name, params, return_type, body })
     }
 
     fn parse_parameters(&mut self) -> PResult<Vec<(String, TypeId)>> {
@@ -213,6 +223,44 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
         Ok(params)
     }
+
+    fn parse_module(&mut self, public: bool) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::Mod)?;
+
+        let name = match self.next_with_span() {
+            (TokenKind::Identifier(name), _) => name.clone(),
+            (other, span) => return Err(ParseError::new(span, format!("expected module name, found {:?}", other))),
+        };
+
+        let mut items = Vec::new();
+
+        match self.next_with_span() {
+            (TokenKind::Semi, _) => {},
+            (TokenKind::LBrace, _) => {
+                while !matches!(self.peek(), TokenKind::EOF) {
+                    items.push(self.parse_item()?)
+                }
+                self.expect(TokenKind::RBrace)?;
+            }
+
+            (other, span) => return Err(ParseError::expected(span, vec![TokenKind::Semi, TokenKind::LBrace], other.clone())),
+        }
+
+        self.push_node(NodeKind::Module { public, name, items })
+    }
+
+    fn parse_use(&mut self, public: bool) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::Use)?;
+
+        // Use tree
+        todo!();
+
+        self.expect(TokenKind::Semi)?;
+
+        self.push_node(NodeKind::UseDecl { public })
+    }
 }
 
 // --- Statements ---
@@ -221,11 +269,7 @@ impl Parser {
     fn parse_statement(&mut self) -> PResult<NodeId> {
         match self.peek() {
             TokenKind::Let => self.parse_let_statement(),
-            TokenKind::Fn => {
-                self.start_span();
-                let item = self.parse_function()?;
-                self.push_node(NodeKind::ItemStmt { item })
-            }
+            TokenKind::Fn | TokenKind::Use | TokenKind::Mod | TokenKind::Pub => self.parse_item(),
             _ => {
                 self.start_span();
                 let expr = self.parse_expression(0)?;
@@ -284,7 +328,7 @@ impl Parser {
         loop {
             let op = self.peek().clone();
             
-            if let Some(expr) = self.try_parse_postfix(&op, lhs)? {
+            if let Some(expr) = self.try_parse_postfix(&op, lhs, start)? {
                 lhs = expr;
                 continue;
             }
@@ -327,8 +371,14 @@ impl Parser {
                 self.next();
                 self.push_node(kind)
             }
-            (TokenKind::Bool(b), _) => {
-                let kind = NodeKind::Literal(Literal::Bool(*b));
+            (TokenKind::True, _) => {
+                let kind = NodeKind::Literal(Literal::Bool(true));
+                self.start_span();
+                self.next();
+                self.push_node(kind)
+            }
+            (TokenKind::False, _) => {
+                let kind = NodeKind::Literal(Literal::Bool(false));
                 self.start_span();
                 self.next();
                 self.push_node(kind)
@@ -338,6 +388,11 @@ impl Parser {
                 self.start_span();
                 self.next();
                 self.push_node(kind)
+            }
+            (TokenKind::Underscore, _) => {
+                self.start_span();
+                self.next();
+                self.push_node(NodeKind::UnderscoreExpr)
             }
 
             // Unary ops
@@ -390,8 +445,23 @@ impl Parser {
             // if expression
             (TokenKind::If, _) => self.parse_if_expression(),
 
+            // Loop expression
+            (TokenKind::Loop, _) => self.parse_loop_expression(),
+
             // Block expression
             (TokenKind::LBrace, _) => self.parse_block_expression(),
+
+            // break expression
+            (TokenKind::Break, _) => {
+                self.start_span();
+                self.next();
+                if matches!(self.peek(), TokenKind::Semi | TokenKind::RBrace | TokenKind::EOF) {
+                    self.push_node(NodeKind::Break { expr: None })
+                } else {
+                    let expr = self.parse_expression(0)?;
+                    self.push_node(NodeKind::Break { expr: Some(expr) })
+                }
+            }
 
             // return expression
             (TokenKind::Return, _) => {
@@ -409,11 +479,11 @@ impl Parser {
         }
     }
 
-    fn try_parse_postfix(&mut self, op: &TokenKind, lhs: NodeId) -> PResult<Option<NodeId>> {
+    fn try_parse_postfix(&mut self, op: &TokenKind, lhs: NodeId, start: Pos) -> PResult<Option<NodeId>> {
         // Function call
         if matches!(op, TokenKind::LParen) {
             self.next();
-
+            
             let mut args = Vec::new();
             if !matches!(self.peek(), TokenKind::RParen) {
                 loop {
@@ -430,8 +500,34 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RParen)?;
-
+            
+            self.pos_stack.push(start);
             return Ok(Some(self.push_node(NodeKind::Call { callee: lhs, args })?));
+        }
+        // array indexing
+        if matches!(op, TokenKind::LBracket) {
+            self.next();
+            
+            let index = self.parse_expression(0)?;
+            
+            self.expect(TokenKind::RBracket)?;
+            
+            self.pos_stack.push(start);
+            return Ok(Some(self.push_node(NodeKind::IndexExpression { array: lhs, index })?));
+        }
+        // tuple indexing / field access
+        if matches!(op, TokenKind::Dot) {
+            self.next();
+            
+            match self.next_with_span() {
+                (TokenKind::Identifier(_field), _) => todo!("Field Access is not yet implemented"),
+                (TokenKind::Int(i), _) => {
+                    let index = *i;
+                    self.pos_stack.push(start);
+                    return Ok(Some(self.push_node(NodeKind::TupleIndexExpression { tuple: lhs, index } )?));
+                }
+                (other, span) => return Err(ParseError::new(span, format!("expected field name or tuple index, found {:?}", other))),
+            }
         }
 
         Ok(None)
@@ -454,6 +550,15 @@ impl Parser {
         };
 
         self.push_node(NodeKind::If { cond, then_block, else_block })
+    }
+
+    fn parse_loop_expression(&mut self) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::Loop)?;
+
+        let block = self.parse_block_expression()?;
+
+        self.push_node(NodeKind::Loop { block })
     }
 
     fn parse_block_expression(&mut self) -> PResult<NodeId> {
@@ -774,7 +879,7 @@ mod tests {
         let src = r#"
             fn main() {
                 fn local(x: Int) -> Int { x * 2 }
-                let x = 5;
+                let mut x: [(List<Int>, Int); 3] = [(List(_), 923); 3];
                 x + 5 = x - 1;
             }
         "#;

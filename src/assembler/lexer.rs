@@ -145,7 +145,7 @@ impl Lexer {
                 }
                 return Some(Ok(Token { kind: TokenType::StringLiteral(s), line: start_line }));
             }
-            '0'..='9' | '.' => {
+            '0'..='9' | '.' | '-' => {
                 let mut number = c.to_string();
                 let mut is_float = c == '.';
 

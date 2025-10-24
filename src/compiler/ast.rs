@@ -13,18 +13,24 @@ pub enum NodeKind {
     Call { callee: NodeId, args: Vec<NodeId> },
     Block { nodes: Vec<NodeId> },
     If { cond: NodeId, then_block: NodeId, else_block: Option<NodeId> },
+    Loop { block: NodeId },
     Return { expr: Option<NodeId> },
+    Break { expr: Option<NodeId> }, // labels?
     Tuple { elements: Vec<NodeId> },
     Array { elements: Vec<NodeId> },
     ArrayRepeat { value: NodeId, count: NodeId },
+    UnderscoreExpr,
+    IndexExpression { array: NodeId , index: NodeId },
+    TupleIndexExpression { tuple: NodeId , index: i32 },
     
     // Statements
     LetStmt { name: String, mutable: bool, ty: Option<TypeId>, value: Option<NodeId> },
     ExprStmt { expr: NodeId },
-    ItemStmt { item: NodeId },
 
     // Items
-    Function { name: String, params: Vec<(String, TypeId)>, return_type: Option<TypeId>, body: NodeId },
+    Function { public:  bool, name: String, params: Vec<(String, TypeId)>, return_type: Option<TypeId>, body: NodeId },
+    Module { public:  bool, name: String, items: Vec<NodeId> },
+    UseDecl { public:  bool,  },
 
     // Program
     Program { items: Vec<NodeId> },

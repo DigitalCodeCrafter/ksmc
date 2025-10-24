@@ -2,10 +2,16 @@
 Program         = { Item };
 
 (* imports, structs, and enums later *)
-Item            = FunctionDecl;
+Item            = ["pub"], ( FunctionDecl | Module | UseDecl );
 
 (* generics later *)
 FunctionDecl    = "fn", Identifier, "(", [ FunctionParams ], ")", [ "->", Type ], BlockExpression;
+
+Module          = "mod", Identifier, ";"
+                | "mod", Identifier, "{", { Item } ,"}";
+
+UseDecl         = "use", UseTree, ";";
+UseTree         = TODO;
 
 (* self param later *)
 FunctionParams  = FunctionParam, { ",", FunctionParam }, [","];
@@ -18,7 +24,7 @@ Statement       = ";"
                 | LetStatement
                 | ExpressionStatement ;
 
-LetStatement    = "let", [ "mut" ], Identifier, "=", Expression, ";" ;
+LetStatement    = "let", [ "mut" ], Identifier, [ ":", Type ], "=", Expression, ";" ;
 
 ExpressionStatement = Expression, ";" ;
 
@@ -31,8 +37,12 @@ Expression      = LiteralExpression
                 | ReturnExpression
                 | UnderscoreExpression
                 | IfExpression
-                | ArrayExpressions
-                | TupleExpressions ;
+                | LoopExpression
+                | ArrayExpression
+                | IndexExpression
+                | TupleExpressions
+                | TupleIndexExpression
+                ;
 
 LiteralExpression = STRING | INT | FLOAT | "true" | "false";
 
@@ -63,23 +73,29 @@ UnderscoreExpression = "_";
 
 IfExpression    = "if", Expression, BlockExpression, [ "else", ( BlockExpression | IfExpression ) ];
 
+LoopExpression  = "loop", BlockExpression;
+
 ArrayExpression = "[", [ ArrayElements ], "]" ;
 ArrayElements = Expression, ";", Expression
               | Expression, { ",", Expression }, [ "," ];
 
+IndexExpression = Expression, "[", Expression, "]";
+
 TupleExpression = "(", TupleElements, ")";
 TupleElements = Expression, ",", { Expression, "," }, [ Expression ];
+
+TupleIndexExpression = Expression, ".", INTEGER_LIT;
 
 (* Types *)
 Type            = FunctionType | ArrayType | TupleType | GenericType | SimpleType;
 
-SimpleType      = Identifier
+SimpleType      = Identifier;
 
 GenericType     = Identifier, "<", TypeList, ">";
 TypeList        = Type, { ",", Type }, [","];
 
 ArrayType       = "[", Type, [ ";", INT ], "]";
 
-TupleType       = "(", Type, "," { Type, "," }, [ Type ], ")";
+TupleType       = "(", Type, ",", { Type, "," }, [ Type ], ")";
 
 FunctionType    = "fn", "(", [ TypeList ], ")", "->", Type ;

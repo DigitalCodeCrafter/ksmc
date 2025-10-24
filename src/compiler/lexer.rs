@@ -10,16 +10,22 @@ pub enum TokenKind {
     Int(i32),
     Float(f64),
     String(String),
-    Bool(bool),
 
     // Keywords
+    Mod,
+    Use,
+    Pub,
+    True,
+    False,
     Let,
     Mut,
     Fn,
+    Return,
     If,
     Else,
     While,
-    Return,
+    Loop,
+    Break,
 
     // Operators
     Plus,       // +
@@ -52,7 +58,9 @@ pub enum TokenKind {
     RBracket,   // ]
     Comma,      // ,
     Colon,      // :
+    ColCol,     // ::
     Semi,       // ;
+    Underscore, // _
 
     // Misc
     EOF,
@@ -106,6 +114,10 @@ impl Lexer {
         Ok(if c.is_alphabetic() {
             self.lex_identifier_or_keyword(start_line, start_col)
         } else if c.is_ascii_digit() {
+            self.lex_number(start_line, start_col)
+        } else if c == '.' || self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
+            self.lex_number(start_line, start_col)
+        } else if c == '-' || self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
             self.lex_number(start_line, start_col)
         } else if c == '"' {
             self.lex_string(start_line, start_col)?
@@ -191,15 +203,20 @@ impl Lexer {
         }
         
         let kind = match s.as_str() {
+            "mod" => TokenKind::Mod,
+            "use" => TokenKind::Use,
+            "pub" => TokenKind::Pub,
+            "true" => TokenKind::True,
+            "false" => TokenKind::False,
             "let" => TokenKind::Let,
             "mut" => TokenKind::Mut,
             "fn" => TokenKind::Fn,
+            "return" => TokenKind::Return,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
-            "return" => TokenKind::Return,
-            "true" => TokenKind::Bool(true),
-            "false" => TokenKind::Bool(false),
+            "loop" => TokenKind::Loop,
+            "break" => TokenKind::Break,
             _ => TokenKind::Identifier(s),
         };
 
@@ -234,13 +251,16 @@ impl Lexer {
             }
         }
 
-        // decimal or floating        
+        // decimal or floating
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '_' {
                 num_str.push(c);
                 self.advance();
             } else if c == '.' && !has_dot && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
                 has_dot = true;
+                num_str.push(c);
+                self.advance();
+            } else if c == '-' && num_str.len() == 0 && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
                 num_str.push(c);
                 self.advance();
             } else if (c == 'e' || c == 'E') && !has_exp {
@@ -366,8 +386,10 @@ impl Lexer {
             ']' => RBracket,
             ',' => Comma,
             ';' => Semi,
+            ':' if self.match_next(':') => ColCol,
             ':' => Colon,
             '.' => Dot,
+            '_' => Underscore,
             _ => return Err(CompilerError::LexerUnexpectedChar { line, col, c }),
         };
 
