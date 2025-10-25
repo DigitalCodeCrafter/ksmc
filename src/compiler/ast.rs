@@ -22,16 +22,24 @@ pub enum NodeKind {
     IndexExpression { array: NodeId , index: NodeId },
     TupleIndexExpression { tuple: NodeId , index: i32 },
     PathExpression { segments: Vec<NodeId> },
-    PathSegment { ident: String },
     ErrorExpr,
+    
+    // Types
+    TypePath { segments: Vec<NodeId> },
+    TypeTuple { elements: Vec<NodeId> },
+    TypeArray { ty: NodeId, len: NodeId },
+    TypeSlice { ty: NodeId },
+    ErrorType,
+
+    PathSegment { ident: String, args: Vec<NodeId> },
 
     // Statements
-    LetStmt { name: String, mutable: bool, ty: Option<TypeId>, value: Option<NodeId> },
+    LetStmt { name: String, mutable: bool, ty: Option<NodeId>, value: Option<NodeId> },
     ExprStmt { expr: NodeId },
     EmptyStmt,
 
     // Items
-    Function { public:  bool, name: String, params: Vec<(String, TypeId)>, return_type: Option<TypeId>, body: NodeId },
+    Function { public:  bool, name: String, params: Vec<(String, NodeId)>, return_type: Option<NodeId>, body: NodeId },
     Module { public:  bool, name: String, items: Option<Vec<NodeId>> },
     UseDecl { public:  bool, use_tree: NodeId },
 
@@ -90,27 +98,4 @@ impl Span {
 pub struct Pos {
     pub line: usize,
     pub col: usize,
-}
-
-// --- Types ---
-
-pub type TypeId = usize;
-
-#[derive(Debug, Clone)]
-pub enum TypeKind {
-    Simple(String),
-    Generic {
-        base: String,
-        args: Vec<TypeId>,
-    },
-    Tuple(Vec<TypeId>),
-    Array {
-        ty: TypeId,
-        len: Option<u32>,
-    },
-    Function {
-        params: Vec<TypeId>,
-        ret: Option<TypeId>,
-    },
-    ErrorType,
 }

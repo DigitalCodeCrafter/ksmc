@@ -99,15 +99,24 @@ BlockExpression = "{", { Statement }, [ Expression ], "}";
 
 (* --------- Types ---------- *)
 
-Type            = FunctionType | ArrayType | TupleType | GenericType | SimpleType;
+Type            = ParenthType
+                | TypePath
+                | TupleType
+                | ArrayType
+                | SliceType
+                ;
 
-SimpleType      = Identifier;
+ParenthType     = "(", Type, ")";
 
-GenericType     = Identifier, "<", TypeList, ">";
-TypeList        = Type, { ",", Type }, [","];
+TypePath        = TypePathSegment, { "::", TypePathSegment };
+TypePathSegment = Identifier, [ "::" ], [ GenericArgs ];
 
-ArrayType       = "[", Type, [ ";", INT ], "]";
+GenericArgs     = "<", ">"
+                | "<", Type, { ",", Type }, [ "," ], ">";
 
 TupleType       = "(", Type, ",", { Type, "," }, [ Type ], ")";
 
-FunctionType    = "fn", "(", [ TypeList ], ")", "->", Type ;
+ArrayType       = "[", Type, ";", Expression, "]";
+
+SliceType       = "[", Type, "]";
+

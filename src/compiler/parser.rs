@@ -29,7 +29,6 @@ pub struct Parser {
     pos: usize,
     errors: Vec<ParseError>,
     arena: Vec<Node>,
-    types: Vec<TypeKind>,
     pos_stack: Vec<Pos>,
 }
 
@@ -40,7 +39,6 @@ impl Parser {
             pos: 0,
             errors: Vec::new(),
             arena: Vec::new(),
-            types: Vec::new(),
             pos_stack: Vec::new(),
         }
     }
@@ -54,7 +52,7 @@ impl Parser {
                 Ok(item) => items.push(item),
                 Err(err) => {
                     self.errors.push(err);
-                    self.recover_to(&[TokenKind::Fn, TokenKind::EOF, TokenKind::Mod, TokenKind::Use]);
+                    self.recover_to(&[TokenKind::Fn, TokenKind::EOF, TokenKind::Mod, TokenKind::Use], &[(TokenKind::LBrace, TokenKind::RBrace)]);
                 }
             }
         }
@@ -127,7 +125,9 @@ impl Parser {
         if std::mem::discriminant(tok) == std::mem::discriminant(&kind) {
             Ok(())
         } else {
-            Err(ParseError::new(span, format!("Expected {:?}, found {:?}", kind, tok)))
+            let msg = format!("Expected {:?}, found {:?}", kind, tok);
+            self.end_span()?; // early return requires drop of started span
+            Err(ParseError::new(span, msg))
         }
     }
 
@@ -147,12 +147,6 @@ impl Parser {
         self.arena.push(Node { kind, span });
         Ok(id)
     }
-
-    fn push_type(&mut self, kind: TypeKind) -> TypeId {
-        let id = self.types.len();
-        self.types.push(kind);
-        id
-    }
 }
 
 // --- Errors ---
@@ -164,9 +158,17 @@ impl Parser {
         err
     }
 
-    fn recover_to(&mut self, set: &[TokenKind]) {
+    fn recover_to(&mut self, set: &[TokenKind], delims: &[(TokenKind, TokenKind)]) {
+        let mut scopes = 0;
         while !matches!(self.peek(), TokenKind::EOF) {
-            if set.contains(&self.peek()) {
+            for (open, close) in delims {
+                match std::mem::discriminant(self.peek()) {
+                    d if d == std::mem::discriminant(open) => scopes += 1,
+                    d if d == std::mem::discriminant(close) => scopes -= 1,
+                    _ => {}
+                }
+            }
+            if set.contains(self.peek()) && scopes <= 0 {
                 return;
             }
             self.next();
@@ -207,7 +209,7 @@ impl Parser {
 
         let return_type = if matches!(self.peek(), TokenKind::Arrow) {
             self.next();
-            Some(self.parse_type())
+            Some(self.parse_type()?)
         } else { None };
 
         let body = self.parse_block_expression()?;
@@ -215,7 +217,7 @@ impl Parser {
         self.push_node(NodeKind::Function { public, name, params, return_type, body })
     }
 
-    fn parse_parameters(&mut self) -> PResult<Vec<(String, TypeId)>> {
+    fn parse_parameters(&mut self) -> PResult<Vec<(String, NodeId)>> {
         let mut params = Vec::new();
         self.expect(TokenKind::LParen)?;
 
@@ -226,7 +228,7 @@ impl Parser {
                     (other, span) => return Err(ParseError::new(span, format!("expected parameter name, found {:?}", other))),
                 };
                 self.expect(TokenKind::Colon)?;
-                let ty = self.parse_type();
+                let ty = self.parse_type()?;
                 params.push((name, ty));
 
                 if matches!(self.peek(), TokenKind::Comma) {
@@ -245,7 +247,6 @@ impl Parser {
     }
 
     fn parse_module(&mut self, public: bool) -> PResult<NodeId> {
-        println!("mod");
         self.start_span();
         self.expect(TokenKind::Mod)?;
 
@@ -354,7 +355,7 @@ impl Parser {
 
         let ty = if matches!(self.peek(), TokenKind::Colon) {
             self.next();
-            Some(self.parse_type())
+            Some(self.parse_type()?)
         } else { None };
 
         let value = if matches!(self.peek(), TokenKind::Eq) {
@@ -375,7 +376,7 @@ impl Parser {
             Err(err) => {
                 self.pos_stack.push(err.span.start);
                 self.errors.push(err);
-                self.recover_to(&[TokenKind::Semi, TokenKind::RBrace]);
+                self.recover_to(&[TokenKind::Semi, TokenKind::RBrace], &[]);
                 self.push_node(NodeKind::ErrorExpr)?
             }
         };
@@ -677,7 +678,7 @@ impl Parser {
                 Ok(stmt) => nodes.push(stmt),
                 Err(err) => {
                     self.errors.push(err);
-                    self.recover_to(&[TokenKind::Semi, TokenKind::RBrace]);
+                    self.recover_to(&[TokenKind::Semi, TokenKind::RBrace], &[(TokenKind::LBrace, TokenKind::RBrace)]);
                 }
             }
         }
@@ -745,7 +746,7 @@ impl Parser {
                     break; // pretend the path has already ended
                 },
             };
-            segments.push(self.push_node(NodeKind::PathSegment { ident })?);
+            segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?); // TODO: generics
 
             if matches!(self.peek(), TokenKind::ColCol) {
                 self.next();
@@ -814,78 +815,124 @@ fn token_to_unary_op(tok: &TokenKind) -> UnaryOp {
 // --- Types ---
 
 impl Parser {
-    fn parse_type(&mut self) -> TypeId {
-        match self.next_with_span() {
-            (TokenKind::Identifier(name), _) => {
-                let name = name.clone();    // borrowing...
-                self.parse_simple_generic_type(name)
-            }
+    fn parse_type(&mut self) -> PResult<NodeId> {
+        match self.peek_with_span() {
+            (TokenKind::Identifier(_), _) => self.parse_type_path(),
 
-            (TokenKind::LBracket, _) => self.parse_array_type(),
+            (TokenKind::LBracket, _) => self.parse_type_array_or_slice(),
 
-            (TokenKind::LParen, _) => self.parse_tuple_type(),
-
-            (TokenKind::Fn, _) => self.parse_func_type(),
+            (TokenKind::LParen, _) => self.parse_type_tuple_or_parenth(),
 
             (other, span) => {
                 let msg = format!("Unexpected token in type: {:?}", other);
                 self.error(span, msg);
-                self.push_type(TypeKind::ErrorType)
+                self.start_span();
+                self.next();
+                self.push_node(NodeKind::ErrorType)
             }
         }
     }
 
-    fn parse_simple_generic_type(&mut self, name: String) -> TypeId {
-        if matches!(self.peek(), TokenKind::Lt) {
-            self.next();
-            let mut args = Vec::new();
+    fn parse_type_path(&mut self) -> PResult<NodeId> {
+        self.start_span();
 
-            if !matches!(self.peek(), TokenKind::Gt) {
-                loop {
-                    args.push(self.parse_type());
-                    if matches!(self.peek(), TokenKind::Comma) {
-                        self.next();
-                    } else {
-                        break;
-                    }
-                    if matches!(self.peek(), TokenKind::Gt) {
-                        break;
+        let mut segments = Vec::new();
+
+        loop {
+            self.start_span();
+            let ident = match self.next_with_span() {
+                (TokenKind::Identifier(ident), _) => ident.clone(),
+                (other, span) => {
+                    let msg = format!("expected identifier, found {:?}", other);
+                    self.error(span, msg);
+                    break; // pretend the path has already ended
+                },
+            };
+            
+            let mut skipped_colcol = false;
+            if matches!(self.peek(), TokenKind::ColCol) {
+                self.next();
+                skipped_colcol = true;
+            }
+            
+            if matches!(self.peek(), TokenKind::Lt) {
+                let args = self.parse_type_generics()?;
+                segments.push(self.push_node(NodeKind::PathSegment { ident, args })?);
+
+                if matches!(self.peek(), TokenKind::ColCol) {
+                    self.next();
+                } else {
+                    break;
+                }
+            } else {
+                segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?);
+
+                // check already done
+                if !skipped_colcol { break; }
+            }
+        }
+
+        self.push_node(NodeKind::TypePath { segments })
+    }
+
+    fn parse_type_generics(&mut self) -> PResult<Vec<NodeId>> {
+        self.expect(TokenKind::Lt)?;
+
+        let mut args = Vec::new();
+
+        if !matches!(self.peek(), TokenKind::Gt) {
+            loop {
+                match self.parse_type() {
+                    Ok(ty) => args.push(ty),
+                    Err(err) => {
+                        self.errors.push(err);
+                        self.recover_to(&[TokenKind::Gt, TokenKind::Comma], &[(TokenKind::LParen, TokenKind::RParen), (TokenKind::Lt, TokenKind::Gt)]);
                     }
                 }
+                
+                if matches!(self.peek(), TokenKind::Comma) {
+                    self.next();
+                } else {
+                    break;
+                }
+                if matches!(self.peek(), TokenKind::Gt) {
+                    break;
+                }
             }
-
-            self.soft_expect(TokenKind::Gt);
-            return self.push_type(TypeKind::Generic { base: name, args: args });
         }
+        self.soft_expect(TokenKind::Gt);
 
-        self.push_type(TypeKind::Simple(name))
+        Ok(args)
     }
 
-    fn parse_array_type(&mut self) -> TypeId {
-        let ty = self.parse_type();
+    fn parse_type_array_or_slice(&mut self) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::LBracket)?;
+
+        let ty = self.parse_type()?;
 
         let len = if matches!(self.peek(), TokenKind::Semi) {
             self.next();
-            match self.next_with_span() {
-                (TokenKind::Int(i), _) => Some(*i as u32),
-                (other, span) => {
-                    let msg = format!("Expected integer length after ';' in array type, found: {:?}", other);
-                    self.error(span, msg);
-                    None
-                }
-            }
+            Some(self.parse_expression(0)?)
         } else { None };
 
         self.soft_expect(TokenKind::RBracket);
-        self.push_type(TypeKind::Array { ty, len })
+        
+        match len {
+            Some(len) => self.push_node(NodeKind::TypeArray { ty, len }),
+            None => self.push_node(NodeKind::TypeSlice { ty }),
+        }
     }
 
-    fn parse_tuple_type(&mut self) -> TypeId {
+    fn parse_type_tuple_or_parenth(&mut self) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::LParen)?;
+
         let mut elements = Vec::new();
         let mut last_was_comma = false;
         if !matches!(self.peek(), TokenKind::RParen) {
             loop {
-                elements.push(self.parse_type());
+                elements.push(self.parse_type()?);
                 if matches!(self.peek(), TokenKind::Comma) {
                     self.next();
                 } else {
@@ -900,36 +947,12 @@ impl Parser {
         self.soft_expect(TokenKind::RParen);
 
         if elements.len() == 1 && !last_was_comma {
-            return elements.pop().unwrap();
+            return Ok(elements.pop().unwrap());
         };
 
-        self.push_type(TypeKind::Tuple(elements))
+        self.push_node(NodeKind::TypeTuple { elements } )
     }
 
-    fn parse_func_type(&mut self) -> TypeId {
-        let mut elements = Vec::new();
-        if !matches!(self.peek(), TokenKind::RParen) {
-            loop {
-                elements.push(self.parse_type());
-                if matches!(self.peek(), TokenKind::Comma) {
-                    self.next();
-                } else {
-                    break;
-                }
-                if matches!(self.peek(), TokenKind::RParen) {
-                    break;
-                }
-            }
-        }
-        self.soft_expect(TokenKind::RParen);
-
-        let ret = if matches!(self.peek(), TokenKind::Arrow) {
-            self.next();
-            Some(self.parse_type())
-        } else { None };
-
-        self.push_type(TypeKind::Function { params: elements, ret })
-    }
 }
 
 // --- Tests ---
@@ -1041,10 +1064,6 @@ mod tests {
         for (i, node) in parser.arena.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
-        println!("\nType Arena:");
-        for (i, ty) in parser.types.iter().enumerate() {
-            println!("{:>2}: {:?}", i, ty);
-        }
     }
 
     #[test]
@@ -1072,10 +1091,6 @@ mod tests {
         println!("AST Root Node ID: {:?}", root);
         for (i, node) in parser.arena.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
-        }
-        println!("\nType Arena:");
-        for (i, ty) in parser.types.iter().enumerate() {
-            println!("{:>2}: {:?}", i, ty);
         }
     }
 
@@ -1105,10 +1120,6 @@ fn main2() -> Int {
         println!("AST Arena:");
         for (i, node) in parser.arena.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
-        }
-        println!("\nType Arena:");
-        for (i, ty) in parser.types.iter().enumerate() {
-            println!("{:>2}: {:?}", i, ty);
         }
 
         println!("");
