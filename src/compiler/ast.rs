@@ -23,10 +23,12 @@ pub enum NodeKind {
     TupleIndexExpression { tuple: NodeId , index: i32 },
     PathExpression { segments: Vec<NodeId> },
     PathSegment { ident: String },
-    
+    ErrorExpr,
+
     // Statements
     LetStmt { name: String, mutable: bool, ty: Option<TypeId>, value: Option<NodeId> },
     ExprStmt { expr: NodeId },
+    EmptyStmt,
 
     // Items
     Function { public:  bool, name: String, params: Vec<(String, TypeId)>, return_type: Option<TypeId>, body: NodeId },
@@ -110,4 +112,5 @@ pub enum TypeKind {
         params: Vec<TypeId>,
         ret: Option<TypeId>,
     },
+    ErrorType,
 }

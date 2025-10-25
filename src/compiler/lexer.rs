@@ -1,7 +1,22 @@
-use crate::compiler::{ast::{Pos, Span}, CResult, CompilerError};
+// Source text -> Tokens
 
+use std::{fs::File, io::Read, path::Path};
+use crate::compiler::{ast::{Pos, Span}, CompilerError, ToCompileResult};
 
 const CASE_SENSITIVITY: bool = true;
+
+#[derive(Debug, Clone)]
+pub struct LexError {
+    pub span: Span,
+    pub message: String,
+}
+
+impl<T> ToCompileResult<T> for Result<T, Vec<LexError>> {
+    fn into_cresult(self) -> Result<T, super::CompilerError> {
+        self.map_err(|err| CompilerError::LexError(err))
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -63,6 +78,9 @@ pub enum TokenKind {
     Dot,        // .
 
     // Misc
+    Invalid(String),
+    UnterminatedString(String),
+
     EOF,
 }
 
@@ -72,9 +90,19 @@ pub struct Token {
     pub span: Span,
 }
 
+pub fn lex_file(path: impl AsRef<Path>) -> std::io::Result<Result<Vec<Token>, Vec<LexError>>> {
+    let mut file = File::open(path)?;
+    let mut src = String::new();
+    file.read_to_string(&mut src)?;
+
+    let mut lexer = Lexer::new(&src);
+    Ok(lexer.lex_all())
+}
+
 pub struct Lexer {
     src: Vec<char>,
     pos: usize,
+    errors: Vec<LexError>,
     line: usize,
     col: usize,
 }
@@ -83,35 +111,40 @@ impl Lexer {
         Self {
             src: input.chars().collect(),
             pos: 0,
+            errors: Vec::new(),
             line: 1,
             col: 1,
         }
     }
 
-    pub fn lex_all(&mut self) -> CResult<Vec<Token>> {
+    pub fn lex_all(&mut self) -> Result<Vec<Token>, Vec<LexError>> {
         let mut tokens = Vec::new();
         loop {
-            let tok = self.next_token()?;
+            let tok = self.next_token();
             if matches!(tok.kind, TokenKind::EOF) {
                 tokens.push(tok); break;
             } else {
                 tokens.push(tok);
             }
         }
-        Ok(tokens)
+        if self.errors.is_empty() {
+            Ok(tokens)
+        } else {
+            Err(self.errors.clone())
+        }
     }
 
-    pub fn next_token(&mut self) -> CResult<Token> {
+    pub fn next_token(&mut self) -> Token {
         self.skip_whitespace_and_comment();
 
         let start_line = self.line;
         let start_col = self.col;
 
         let Some(c) = self.peek() else {
-            return Ok(self.make_token(TokenKind::EOF, start_line, start_col));
+            return self.make_token(TokenKind::EOF, start_line, start_col);
         };
 
-        Ok(if c.is_alphabetic() {
+        if c.is_alphabetic() {
             self.lex_identifier_or_keyword(start_line, start_col)
         } else if c.is_ascii_digit() {
             self.lex_number(start_line, start_col)
@@ -120,14 +153,18 @@ impl Lexer {
         } else if c == '-' && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
             self.lex_number(start_line, start_col)
         } else if c == '"' {
-            self.lex_string(start_line, start_col)?
+            self.lex_string(start_line, start_col)
         } else {
-            self.lex_symbol(start_line, start_col)?
-        })
+            self.lex_symbol(start_line, start_col)
+        }
     }
 
     fn make_token(&self, kind: TokenKind, line: usize, col: usize) -> Token {
-        Token { kind, span: Span { start: Pos { line, col }, end: Pos { line: self.line, col: self.col } }}
+        Token { kind, span: self.make_span(line, col) }
+    }
+
+    fn make_span(&self, line: usize, col: usize) -> Span {
+        Span { start: Pos { line, col }, end: Pos { line: self.line, col: self.col } }
     }
 
     // --------- Iteration ---------
@@ -174,11 +211,25 @@ impl Lexer {
                     }
                 }
                 Some('/') if self.peek_ahead(1) == Some('*') => {
-                    self.advance(); self.advance(); // consume "/*"
-                    while !(self.peek() == Some('*') && self.peek_ahead(1) == Some('/')) {
-                        if self.advance().is_none() { break; }
+                    let start_line = self.line;
+                    let start_col = self.col;
+                    let mut block_count = 0;
+                    loop {
+                        if self.peek() == Some('/') && self.peek_ahead(1) == Some('*') {
+                            self.advance(); self.advance(); // consume "/*"
+                            block_count += 1;
+                        }
+                        if self.peek() == Some('*') && self.peek_ahead(1) == Some('/') {
+                            self.advance(); self.advance(); // consume "*/"
+                            block_count -= 1;
+                        }
+                        if block_count <= 0 { break; }
+                        
+                        if self.advance().is_none() {
+                            self.error(self.make_span(start_line, start_col), "Unterminated block comment");
+                            break;
+                        }
                     }
-                    self.advance(); self.advance(); // consume "*/"
                 }
                 _ => break,
             }
@@ -323,13 +374,12 @@ impl Lexer {
 
     // --------- Strings ---------
 
-    fn lex_string(&mut self, line: usize, col: usize) -> CResult<Token> {
+    fn lex_string(&mut self, line: usize, col: usize) -> Token {
         self.advance(); // consume '"'
         let mut s = String::new();
 
         loop {
             match self.advance() {
-                None => return Err(CompilerError::LexerUnterminatedString { line, col }),
                 Some('"') => break,
                 Some('\\') => {
                     if let Some(escaped) = self.advance() {
@@ -346,15 +396,19 @@ impl Lexer {
                     }
                 }
                 Some(c) => s.push(c),
+                None => {
+                    self.error(self.make_span(line, col), "Unterminated string literal");
+                    return self.make_token(TokenKind::UnterminatedString(s), line, col);
+                }
             }
         }
-
-        Ok(self.make_token(TokenKind::String(s), line, col))
+        
+        self.make_token(TokenKind::String(s), line, col)
     }
 
     // --------- Symbols & Operators ---------
 
-    fn lex_symbol(&mut self, line: usize, col: usize) -> CResult<Token> {
+    fn lex_symbol(&mut self, line: usize, col: usize) -> Token {
         use TokenKind::*;
         let c = self.advance().unwrap();
 
@@ -390,10 +444,22 @@ impl Lexer {
             ':' => Colon,
             '.' => Dot,
             '_' => Underscore,
-            _ => return Err(CompilerError::LexerUnexpectedChar { line, col, c }),
+            c => {
+                self.error(self.make_span(line, col), format!("Unexpected character '{}'", c));
+                Invalid(c.to_string())
+            }
         };
 
-        Ok(self.make_token(kind, line, col))
+        self.make_token(kind, line, col)
+    }
+
+    // --------- Errors ---------
+
+    fn error(&mut self, span: Span, message: impl Into<String>) {
+        self.errors.push(LexError {
+            span,
+            message: message.into(),
+        });
     }
 }
 
@@ -417,12 +483,13 @@ mod tests {
         let mut lexer = Lexer::new(src);
         let mut i = 0;
         loop {
-            let tok = lexer.next_token().unwrap();
+            let tok = lexer.next_token();
             println!("{:?}", tok);
             assert_eq!(tok.kind, expected[i]);
             if matches!(tok.kind, TokenKind::EOF) { break; }
             i += 1;
         }
+        assert!(lexer.errors.is_empty(), "ERRORS: {:?}", lexer.errors);
     }
 
     #[test]
@@ -438,11 +505,34 @@ mod tests {
         let mut lexer = Lexer::new(src);
         let mut i = 0;
         loop {
-            let tok = lexer.next_token().unwrap();
+            let tok = lexer.next_token();
             println!("{:?}", tok);
             assert_eq!(tok.kind, expected[i]);
             if matches!(tok.kind, TokenKind::EOF) { break; }
             i += 1;
         }
+        assert!(lexer.errors.is_empty(), "ERRORS: {:?}", lexer.errors);
+    }
+
+    #[test]
+    fn test_error() {
+        let src = r#"
+        ° "adsjd
+        "#;
+
+        let expected = vec![
+            TokenKind::Invalid("°".into()), TokenKind::UnterminatedString("adsjd\n        ".into()), TokenKind::EOF
+        ];
+        let mut lexer = Lexer::new(src);
+        let mut i = 0;
+        loop {
+            let tok = lexer.next_token();
+            println!("{:?}", tok);
+            assert_eq!(tok.kind, expected[i]);
+            if matches!(tok.kind, TokenKind::EOF) { break; }
+            i += 1;
+        }
+        assert_eq!(lexer.errors.len(), 2, "Error length mismatch: {:?}", lexer.errors);
+        println!("Errors: {:?}", lexer.errors)
     }
 }

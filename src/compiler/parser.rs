@@ -1,3 +1,4 @@
+use super::{ToCompileResult, CompilerError};
 use super::lexer::{Token, TokenKind};
 use super::ast::*;
 
@@ -6,30 +7,27 @@ use super::ast::*;
 pub struct ParseError {
     pub span: Span,
     pub message: String,
-    pub expected: Vec<TokenKind>, // optional
 }
 impl ParseError {
     pub fn new(span: Span, message: impl Into<String>) -> Self {
         Self {
             span,
             message: message.into(),
-            expected: vec![]
         }
     }
-
-    pub fn expected(span: Span, expected: Vec<TokenKind>, found: TokenKind) -> Self {
-        Self {
-            span,
-            message: format!("expected one of {:?}, found {:?}", expected, found),
-            expected,
-        }
+}
+impl<T> ToCompileResult<T> for Result<T, Vec<ParseError>> {
+    fn into_cresult(self) -> Result<T, super::CompilerError> {
+        self.map_err(|err| CompilerError::ParseError(err))
     }
 }
 type PResult<T> = Result<T, ParseError>;
 
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    errors: Vec<ParseError>,
     arena: Vec<Node>,
     types: Vec<TypeKind>,
     pos_stack: Vec<Pos>,
@@ -40,6 +38,7 @@ impl Parser {
         Self {
             tokens,
             pos: 0,
+            errors: Vec::new(),
             arena: Vec::new(),
             types: Vec::new(),
             pos_stack: Vec::new(),
@@ -48,45 +47,37 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> Result<NodeId, Vec<ParseError>> {
         let mut items = Vec::new();
-        let mut errors = Vec::new();
 
         self.start_span();
         while !matches!(self.peek(), TokenKind::EOF) {
             match self.parse_item() {
                 Ok(item) => items.push(item),
                 Err(err) => {
-                    errors.push(err);
-                    self.syncronize();
+                    self.errors.push(err);
+                    self.recover_to(&[TokenKind::Fn, TokenKind::EOF, TokenKind::Mod, TokenKind::Use]);
                 }
             }
         }
-        
+
         let program = match self.push_node(NodeKind::Program { items }) {
             Ok(program) => Some(program),
             Err(err) => {
-                errors.push(err);
+                self.errors.push(err);
                 None
             }
         };
 
-        if errors.is_empty() {
+        if self.errors.is_empty() {
             Ok(program.unwrap())
         } else {
-            Err(errors)
+            Err(self.errors.clone())
         }
     }
+}
 
-    fn syncronize(&mut self) {
-        // try to recover by going to a seperator and dropping all lower spans.
-        while !matches!(self.peek(), TokenKind::EOF | TokenKind::Semi | TokenKind::RBrace) {
-            self.next();
-        }
-        while self.pos_stack.len() > 1 {
-            self.pos_stack.pop().unwrap();
-        }
-        self.next();
-    }
+// --- Helpers ---
 
+impl Parser {
     fn peek(&self) -> &TokenKind {
         self.tokens
             .get(self.pos)
@@ -127,7 +118,7 @@ impl Parser {
         let Some(start) = self.pos_stack.pop() else {
             return Err(ParseError::new(Span::empty(), "No spans open to close"));
         };
-        let end = self.tokens.get(self.pos - 1).map(|t| t.span.end).unwrap_or(Pos { line: 0, col: 0 });
+        let end = self.tokens.get(self.pos.checked_sub(1).unwrap_or(0)).map(|t| t.span.end).unwrap_or(Pos { line: 0, col: 0 });
         Ok(Span { start, end })
     }
 
@@ -137,6 +128,16 @@ impl Parser {
             Ok(())
         } else {
             Err(ParseError::new(span, format!("Expected {:?}, found {:?}", kind, tok)))
+        }
+    }
+
+    fn soft_expect(&mut self, kind: TokenKind) {
+        let (tok, span) = self.peek_with_span();
+        if std::mem::discriminant(tok) != std::mem::discriminant(&kind) {
+            let msg = format!("Expected {:?}, found {:?}", kind, tok);
+            self.error(span, msg);
+        } else {
+            self.next();
         }
     }
 
@@ -151,6 +152,25 @@ impl Parser {
         let id = self.types.len();
         self.types.push(kind);
         id
+    }
+}
+
+// --- Errors ---
+
+impl Parser {
+    fn error(&mut self, span: Span, msg: impl Into<String>) -> ParseError {
+        let err = ParseError::new(span, msg);
+        self.errors.push(err.clone());
+        err
+    }
+
+    fn recover_to(&mut self, set: &[TokenKind]) {
+        while !matches!(self.peek(), TokenKind::EOF) {
+            if set.contains(&self.peek()) {
+                return;
+            }
+            self.next();
+        }
     }
 }
 
@@ -187,7 +207,7 @@ impl Parser {
 
         let return_type = if matches!(self.peek(), TokenKind::Arrow) {
             self.next();
-            Some(self.parse_type()?)
+            Some(self.parse_type())
         } else { None };
 
         let body = self.parse_block_expression()?;
@@ -206,7 +226,7 @@ impl Parser {
                     (other, span) => return Err(ParseError::new(span, format!("expected parameter name, found {:?}", other))),
                 };
                 self.expect(TokenKind::Colon)?;
-                let ty = self.parse_type()?;
+                let ty = self.parse_type();
                 params.push((name, ty));
 
                 if matches!(self.peek(), TokenKind::Comma) {
@@ -246,7 +266,7 @@ impl Parser {
                 self.expect(TokenKind::RBrace)?;
             }
 
-            (other, span) => return Err(ParseError::expected(span, vec![TokenKind::Semi, TokenKind::LBrace], other.clone())),
+            (other, span) => return Err(ParseError::new(span, format!("expected ';' or inlined module, found {:?}", other))),
         }
 
         self.push_node(NodeKind::Module { public, name, items })
@@ -258,7 +278,7 @@ impl Parser {
 
         let use_tree = self.parse_use_tree()?;
 
-        self.expect(TokenKind::Semi)?;
+        self.soft_expect(TokenKind::Semi);
 
         self.push_node(NodeKind::UseDecl { public, use_tree })
     }
@@ -309,25 +329,14 @@ impl Parser {
 impl Parser {
     fn parse_statement(&mut self) -> PResult<NodeId> {
         match self.peek() {
+            TokenKind::Semi => {
+                self.start_span();
+                self.next();
+                self.push_node(NodeKind::EmptyStmt)
+            }
             TokenKind::Let => self.parse_let_statement(),
             TokenKind::Fn | TokenKind::Use | TokenKind::Mod | TokenKind::Pub => self.parse_item(),
-            _ => {
-                self.start_span();
-                let expr = self.parse_expression(0)?;
-                // optional ';' if end of block
-                if matches!(self.peek(), TokenKind::RBrace | TokenKind::EOF) {
-                    if matches!(self.peek(), TokenKind::Semi) {
-                        self.next();
-                        self.push_node(NodeKind::ExprStmt { expr })
-                    } else {
-                        self.end_span()?; // manualy discard, as theres no node to write to.
-                        Ok(expr)
-                    }
-                } else {
-                    self.expect(TokenKind::Semi)?;
-                    self.push_node(NodeKind::ExprStmt { expr })
-                }
-            }
+            _ => self.parse_expression_statement(),
         }
     }
 
@@ -345,7 +354,7 @@ impl Parser {
 
         let ty = if matches!(self.peek(), TokenKind::Colon) {
             self.next();
-            Some(self.parse_type()?)
+            Some(self.parse_type())
         } else { None };
 
         let value = if matches!(self.peek(), TokenKind::Eq) {
@@ -353,9 +362,37 @@ impl Parser {
             Some(self.parse_expression(0)?)
         } else { None };
 
-        self.expect(TokenKind::Semi)?;
+        self.soft_expect(TokenKind::Semi);
 
         self.push_node(NodeKind::LetStmt { name, mutable, ty, value })
+    }
+
+    fn parse_expression_statement(&mut self) -> PResult<NodeId> {
+        self.start_span();
+
+        let expr = match self.parse_expression(0) {
+            Ok(expr) => expr,
+            Err(err) => {
+                self.pos_stack.push(err.span.start);
+                self.errors.push(err);
+                self.recover_to(&[TokenKind::Semi, TokenKind::RBrace]);
+                self.push_node(NodeKind::ErrorExpr)?
+            }
+        };
+        
+        // optional ';' if end of block
+        if matches!(self.peek(), TokenKind::RBrace | TokenKind::EOF) {
+            if matches!(self.peek(), TokenKind::Semi) {
+                self.next();
+                self.push_node(NodeKind::ExprStmt { expr })
+            } else {
+                self.end_span()?; // manualy discard, as the node has already been created.
+                Ok(expr)
+            }
+        } else {
+            self.soft_expect(TokenKind::Semi);
+            self.push_node(NodeKind::ExprStmt { expr })
+        }
     }
 }
 
@@ -408,6 +445,12 @@ impl Parser {
             }
             (TokenKind::Float(v), _) =>{
                 let kind = NodeKind::Literal(Literal::Float(*v));
+                self.start_span();
+                self.next();
+                self.push_node(kind)
+            }
+            (TokenKind::String(s), _) => {
+                let kind = NodeKind::Literal(Literal::Str(s.clone()));
                 self.start_span();
                 self.next();
                 self.push_node(kind)
@@ -478,7 +521,7 @@ impl Parser {
                         Ok(first)
                     }
 
-                    (other, span) => return Err(ParseError::expected(span, vec![TokenKind::Comma, TokenKind::RParen], other.clone())),
+                    (other, span) => return Err(ParseError::new(span, format!("expected ')' or tuple, found {:?}", other))),
                 }
             }
 
@@ -515,7 +558,23 @@ impl Parser {
                 }
             }
 
-            (other, span) => return Err(ParseError::new(span, format!("Unexpected Token in prefix: {:?}", other))),
+            (other, span) => {
+                let msg = format!("Unexpected Token in prefix: {:?}", other);
+                if is_infix_operator(other) {
+                    self.error(span, msg);
+                    self.next();
+                    self.parse_prefix()
+                } else if matches!(other, TokenKind::Semi) {
+                    self.error(span, msg);
+                    self.start_span();
+                    self.push_node(NodeKind::ErrorExpr)
+                } else {
+                    self.error(span, msg);
+                    self.start_span();
+                    self.next();
+                    self.push_node(NodeKind::ErrorExpr)
+                }
+            }
         }
     }
 
@@ -539,7 +598,7 @@ impl Parser {
                     }
                 }
             }
-            self.expect(TokenKind::RParen)?;
+            self.soft_expect(TokenKind::RParen);
             
             self.pos_stack.push(start);
             return Ok(Some(self.push_node(NodeKind::Call { callee: lhs, args })?));
@@ -550,7 +609,7 @@ impl Parser {
             
             let index = self.parse_expression(0)?;
             
-            self.expect(TokenKind::RBracket)?;
+            self.soft_expect(TokenKind::RBracket);
             
             self.pos_stack.push(start);
             return Ok(Some(self.push_node(NodeKind::IndexExpression { array: lhs, index })?));
@@ -566,7 +625,11 @@ impl Parser {
                     self.pos_stack.push(start);
                     return Ok(Some(self.push_node(NodeKind::TupleIndexExpression { tuple: lhs, index } )?));
                 }
-                (other, span) => return Err(ParseError::new(span, format!("expected field name or tuple index, found {:?}", other))),
+                (other, span) => {
+                    let msg = format!("expected field name or tuple index, found {:?}", other);
+                    self.error(span, msg);
+                    return Ok(None); // a dot never happeded...
+                }
             }
         }
 
@@ -576,8 +639,11 @@ impl Parser {
     fn parse_if_expression(&mut self) -> PResult<NodeId> {
         self.start_span();
         self.expect(TokenKind::If)?;
+
         let cond = self.parse_expression(0)?;
+
         let then_block = self.parse_block_expression()?;
+
         let else_block = if matches!(self.peek(), TokenKind::Else) {
             self.next();
             if matches!(self.peek(), TokenKind::If) {
@@ -607,10 +673,16 @@ impl Parser {
         let mut nodes = Vec::new();
         
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::EOF) {
-            nodes.push(self.parse_statement()?);
+            match self.parse_statement() {
+                Ok(stmt) => nodes.push(stmt),
+                Err(err) => {
+                    self.errors.push(err);
+                    self.recover_to(&[TokenKind::Semi, TokenKind::RBrace]);
+                }
+            }
         }
 
-        self.expect(TokenKind::RBrace)?;
+        self.soft_expect(TokenKind::RBrace);
 
         self.push_node(NodeKind::Block { nodes })
     }
@@ -630,7 +702,7 @@ impl Parser {
                 // repetition: [ value ; count ]
                 self.next();
                 let count = self.parse_expression(0)?;
-                self.expect(TokenKind::RBracket)?;
+                self.soft_expect(TokenKind::RBracket);
                 self.push_node(NodeKind::ArrayRepeat { value: first, count })
             }
 
@@ -644,7 +716,7 @@ impl Parser {
                     }
                     elements.push(self.parse_expression(0)?);
                 }
-                self.expect(TokenKind::RBracket)?;
+                self.soft_expect(TokenKind::RBracket);
                 self.push_node(NodeKind::Array { elements })
             }
 
@@ -654,7 +726,7 @@ impl Parser {
                 self.push_node(NodeKind::Array { elements: vec![first] })
             }
 
-            (other, span) => return Err(ParseError::expected(span, vec![TokenKind::Semi, TokenKind::Comma, TokenKind::RBracket], other.clone())),
+            (other, span) => return Err(ParseError::new(span, format!("expected ',', ']', or ';', found {:?}", other))),
         }
     }
 
@@ -667,7 +739,11 @@ impl Parser {
             self.start_span();
             let ident = match self.next_with_span() {
                 (TokenKind::Identifier(ident), _) => ident.clone(),
-                (other, span) => return Err(ParseError::new(span, format!("expected identifier, found {:?}", other))),
+                (other, span) => {
+                    let msg = format!("expected identifier, found {:?}", other);
+                    self.error(span, msg);
+                    break; // pretend the path has already ended
+                },
             };
             segments.push(self.push_node(NodeKind::PathSegment { ident })?);
 
@@ -738,31 +814,35 @@ fn token_to_unary_op(tok: &TokenKind) -> UnaryOp {
 // --- Types ---
 
 impl Parser {
-    fn parse_type(&mut self) -> PResult<TypeId> {
-        Ok(match self.next_with_span() {
+    fn parse_type(&mut self) -> TypeId {
+        match self.next_with_span() {
             (TokenKind::Identifier(name), _) => {
                 let name = name.clone();    // borrowing...
-                self.parse_simple_generic_type(name)?
-            },
+                self.parse_simple_generic_type(name)
+            }
 
-            (TokenKind::LBracket, _) => self.parse_array_type()?,
+            (TokenKind::LBracket, _) => self.parse_array_type(),
 
-            (TokenKind::LParen, _) => self.parse_tuple_type()?,
+            (TokenKind::LParen, _) => self.parse_tuple_type(),
 
-            (TokenKind::Fn, _) => self.parse_func_type()?,
+            (TokenKind::Fn, _) => self.parse_func_type(),
 
-            (other, span) => return Err(ParseError::new(span, format!("Unexpected token in type: {:?}", other))),
-        })
+            (other, span) => {
+                let msg = format!("Unexpected token in type: {:?}", other);
+                self.error(span, msg);
+                self.push_type(TypeKind::ErrorType)
+            }
+        }
     }
 
-    fn parse_simple_generic_type(&mut self, name: String) -> PResult<TypeId> {
+    fn parse_simple_generic_type(&mut self, name: String) -> TypeId {
         if matches!(self.peek(), TokenKind::Lt) {
             self.next();
             let mut args = Vec::new();
 
             if !matches!(self.peek(), TokenKind::Gt) {
                 loop {
-                    args.push(self.parse_type()?);
+                    args.push(self.parse_type());
                     if matches!(self.peek(), TokenKind::Comma) {
                         self.next();
                     } else {
@@ -774,34 +854,38 @@ impl Parser {
                 }
             }
 
-            self.expect(TokenKind::Gt)?;
-            return Ok(self.push_type(TypeKind::Generic { base: name, args: args }));
+            self.soft_expect(TokenKind::Gt);
+            return self.push_type(TypeKind::Generic { base: name, args: args });
         }
 
-        Ok(self.push_type(TypeKind::Simple(name)))
+        self.push_type(TypeKind::Simple(name))
     }
 
-    fn parse_array_type(&mut self) -> PResult<TypeId> {
-        let ty = self.parse_type()?;
+    fn parse_array_type(&mut self) -> TypeId {
+        let ty = self.parse_type();
 
         let len = if matches!(self.peek(), TokenKind::Semi) {
             self.next();
             match self.next_with_span() {
                 (TokenKind::Int(i), _) => Some(*i as u32),
-                (other, span) => return Err(ParseError::new(span, format!("Expected integer length after ';' in array type, found: {:?}", other))),
+                (other, span) => {
+                    let msg = format!("Expected integer length after ';' in array type, found: {:?}", other);
+                    self.error(span, msg);
+                    None
+                }
             }
         } else { None };
 
-        self.expect(TokenKind::RBracket)?;
-        Ok(self.push_type(TypeKind::Array { ty, len }))
+        self.soft_expect(TokenKind::RBracket);
+        self.push_type(TypeKind::Array { ty, len })
     }
 
-    fn parse_tuple_type(&mut self) -> PResult<TypeId> {
+    fn parse_tuple_type(&mut self) -> TypeId {
         let mut elements = Vec::new();
         let mut last_was_comma = false;
         if !matches!(self.peek(), TokenKind::RParen) {
             loop {
-                elements.push(self.parse_type()?);
+                elements.push(self.parse_type());
                 if matches!(self.peek(), TokenKind::Comma) {
                     self.next();
                 } else {
@@ -813,20 +897,20 @@ impl Parser {
                 }
             }
         }
-        self.expect(TokenKind::RParen)?;
+        self.soft_expect(TokenKind::RParen);
 
         if elements.len() == 1 && !last_was_comma {
-            return Ok(elements.pop().unwrap());
+            return elements.pop().unwrap();
         };
 
-        Ok(self.push_type(TypeKind::Tuple(elements)))
+        self.push_type(TypeKind::Tuple(elements))
     }
 
-    fn parse_func_type(&mut self) -> PResult<TypeId> {
+    fn parse_func_type(&mut self) -> TypeId {
         let mut elements = Vec::new();
         if !matches!(self.peek(), TokenKind::RParen) {
             loop {
-                elements.push(self.parse_type()?);
+                elements.push(self.parse_type());
                 if matches!(self.peek(), TokenKind::Comma) {
                     self.next();
                 } else {
@@ -837,14 +921,14 @@ impl Parser {
                 }
             }
         }
-        self.expect(TokenKind::RParen)?;
+        self.soft_expect(TokenKind::RParen);
 
         let ret = if matches!(self.peek(), TokenKind::Arrow) {
             self.next();
-            Some(self.parse_type()?)
+            Some(self.parse_type())
         } else { None };
 
-        Ok(self.push_type(TypeKind::Function { params: elements, ret }))
+        self.push_type(TypeKind::Function { params: elements, ret })
     }
 }
 
@@ -992,6 +1076,59 @@ mod tests {
         println!("\nType Arena:");
         for (i, ty) in parser.types.iter().enumerate() {
             println!("{:>2}: {:?}", i, ty);
+        }
+    }
+
+    #[test]
+    fn test_errors() {
+        use crate::compiler::lexer::Lexer;
+
+        let src = r#"
+fn main() {
+    fn local() -> Type { + 5 }
+    let x =;
+    x + 5 = x 1;
+}
+
+fn main2() -> Int {
+    if true {} else {}
+    let = 0;
+}
+        "#;
+
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.lex_all().unwrap();
+        
+        let mut parser = Parser::new(tokens);
+        let errors = parser.parse_program().unwrap_err();
+
+        println!("AST Arena:");
+        for (i, node) in parser.arena.iter().enumerate() {
+            println!("{:>2}: {:?}", i, node.kind);
+        }
+        println!("\nType Arena:");
+        for (i, ty) in parser.types.iter().enumerate() {
+            println!("{:>2}: {:?}", i, ty);
+        }
+
+        println!("");
+        for e in errors {
+            let lines: String = src.lines()
+            .enumerate()
+            .take(e.span.end.line)
+            .skip(e.span.start.line - 1)
+            .map(|(line, src)| {
+                    let mut col = 0;
+                    let arrows: String = std::iter::repeat_with(|| {
+                        col += 1;
+                        if line + 1 == e.span.start.line && col < e.span.start.col {' '}
+                        else if line + 1 == e.span.end.line && col >= e.span.end.col {' '}
+                        else { '^' }
+                    }).take(src.chars().count()).collect();
+                    format!("{:>4} | {}\n       {}\n--------------------\n", line + 1, src, arrows)
+                }).collect();
+
+            println!("Error: {} \n{}", e.message, lines)
         }
     }
 }
