@@ -17,7 +17,6 @@ impl<T> ToCompileResult<T> for Result<T, Vec<LexError>> {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // Identifiers and Literals

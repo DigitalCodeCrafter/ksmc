@@ -23,6 +23,15 @@ impl<T> ToCompileResult<T> for Result<T, Vec<ParseError>> {
 }
 type PResult<T> = Result<T, ParseError>;
 
+pub fn parse_tokens(tokens: Vec<Token>) -> Result<AST, Vec<ParseError>> {
+    let mut parser = Parser::new(tokens);
+    
+    match parser.parse_program() {
+        Ok(items) => Ok(AST { nodes: parser.arena, items }),
+        Err(_) => Err(parser.errors),
+    }
+}
+
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -43,10 +52,10 @@ impl Parser {
         }
     }
 
-    pub fn parse_program(&mut self) -> Result<NodeId, Vec<ParseError>> {
+    pub fn parse_program(&mut self) -> Result<Vec<NodeId>, &[ParseError]> {
+        self.start_span();
         let mut items = Vec::new();
 
-        self.start_span();
         while !matches!(self.peek(), TokenKind::EOF) {
             match self.parse_item() {
                 Ok(item) => items.push(item),
@@ -57,18 +66,10 @@ impl Parser {
             }
         }
 
-        let program = match self.push_node(NodeKind::Program { items }) {
-            Ok(program) => Some(program),
-            Err(err) => {
-                self.errors.push(err);
-                None
-            }
-        };
-
         if self.errors.is_empty() {
-            Ok(program.unwrap())
+            Ok(items)
         } else {
-            Err(self.errors.clone())
+            Err(&self.errors)
         }
     }
 }
@@ -1115,7 +1116,7 @@ fn main2() -> Int {
         let tokens = lexer.lex_all().unwrap();
         
         let mut parser = Parser::new(tokens);
-        let errors = parser.parse_program().unwrap_err();
+        parser.parse_program().unwrap_err();
 
         println!("AST Arena:");
         for (i, node) in parser.arena.iter().enumerate() {
@@ -1123,7 +1124,7 @@ fn main2() -> Int {
         }
 
         println!("");
-        for e in errors {
+        for e in parser.errors {
             let lines: String = src.lines()
             .enumerate()
             .take(e.span.end.line)

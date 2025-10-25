@@ -1,4 +1,10 @@
 
+#[derive(Debug, Clone)]
+pub struct AST {
+    pub nodes: Vec<Node>,
+    pub items: Vec<NodeId>,
+}
+
 // --- AST Nodes ---
 
 pub type NodeId = usize;
@@ -47,9 +53,6 @@ pub enum NodeKind {
     UseGroup { trees: Vec<NodeId> },
     UseName { ident: String },
     UseGlob,
-
-    // Program
-    Program { items: Vec<NodeId> },
 }
 
 #[derive(Debug, Clone)]
