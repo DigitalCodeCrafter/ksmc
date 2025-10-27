@@ -4,8 +4,8 @@
 
 - [x] Lexing
 - [x] Parsing
-- [ ] Expansion
-- [ ] Resolution
+- [x] Expansion
+- [x] Resolution
 - [ ] Validation
 - [ ] Type checking
 - [ ] Lowering
