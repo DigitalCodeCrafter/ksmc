@@ -293,12 +293,23 @@ impl Parser {
             (TokenKind::Identifier(ident), _) => {
                 let ident = ident.clone();
 
-                if matches!(self.peek(), TokenKind::ColCol) {
-                    self.next();
-                    let tree = self.parse_use_tree()?;
-                    self.push_node(NodeKind::UsePath { ident, tree })
-                } else {
-                    self.push_node(NodeKind::UseName { ident })
+                match self.peek() {
+                    TokenKind::ColCol => {
+                        self.next();
+                        let tree = self.parse_use_tree()?;
+                        self.push_node(NodeKind::UsePath { ident, tree })
+                    }
+                    TokenKind::As => {
+                        self.next();
+                        let name = match self.next_with_span() {
+                            (TokenKind::Identifier(name), _) => name.clone(),
+                            (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
+                        };
+                        self.push_node(NodeKind::UseRename { ident, name })
+                    }
+                    _ => {
+                        self.push_node(NodeKind::UseName { ident })
+                    }
                 }
             }
             (TokenKind::LBrace, _) => {

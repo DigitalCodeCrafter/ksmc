@@ -1,6 +1,4 @@
 // Source text -> Tokens
-
-use std::{fs::File, io::Read, path::Path};
 use crate::compiler::{ast::{Pos, Span}, CompilerError, ToCompileResult};
 
 const CASE_SENSITIVITY: bool = true;
@@ -28,6 +26,7 @@ pub enum TokenKind {
     // Keywords
     Mod,
     Use,
+    As,
     Pub,
     True,
     False,
@@ -89,13 +88,9 @@ pub struct Token {
     pub span: Span,
 }
 
-pub fn lex_file(path: impl AsRef<Path>) -> std::io::Result<Result<Vec<Token>, Vec<LexError>>> {
-    let mut file = File::open(path)?;
-    let mut src = String::new();
-    file.read_to_string(&mut src)?;
-
+pub fn lex_all(src: &str) -> Result<Vec<Token>, Vec<LexError>> {
     let mut lexer = Lexer::new(&src);
-    Ok(lexer.lex_all())
+    lexer.lex_all()
 }
 
 pub struct Lexer {
@@ -253,19 +248,20 @@ impl Lexer {
         }
         
         let kind = match s.as_str() {
-            "mod" => TokenKind::Mod,
-            "use" => TokenKind::Use,
-            "pub" => TokenKind::Pub,
-            "true" => TokenKind::True,
+            "mod"   => TokenKind::Mod,
+            "use"   => TokenKind::Use,
+            "as"    => TokenKind::As,
+            "pub"   => TokenKind::Pub,
+            "true"  => TokenKind::True,
             "false" => TokenKind::False,
-            "let" => TokenKind::Let,
-            "mut" => TokenKind::Mut,
-            "fn" => TokenKind::Fn,
-            "return" => TokenKind::Return,
-            "if" => TokenKind::If,
-            "else" => TokenKind::Else,
+            "let"   => TokenKind::Let,
+            "mut"   => TokenKind::Mut,
+            "fn"    => TokenKind::Fn,
+            "return"=> TokenKind::Return,
+            "if"    => TokenKind::If,
+            "else"  => TokenKind::Else,
             "while" => TokenKind::While,
-            "loop" => TokenKind::Loop,
+            "loop"  => TokenKind::Loop,
             "break" => TokenKind::Break,
             _ => TokenKind::Identifier(s),
         };

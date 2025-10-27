@@ -53,9 +53,10 @@ impl<'a> Expander<'a> {
                 if let NodeKind::Module { ref items, .. } = self.ast.nodes[node_id].kind {
                     if let Some(ids) = items {
                         let ids = ids.clone();
-                        let new_base = resolve_module_dir(current_path, name);
+                        let mut dir = current_path.to_path_buf();
+                        dir.push(name);
                         for child_id in ids {
-                            self.expand_node(child_id, &new_base)?;
+                            self.expand_node(child_id, &dir)?;
                         }
                     }
                 }
@@ -104,88 +105,9 @@ impl<'a> Expander<'a> {
 }
 
 fn rebase_node_ids(nodes: &mut [Node], offset: usize) {
-    use NodeKind::*;
     for node in nodes {
-        match &mut node.kind {
-            Unary { expr: id, .. } |
-            Loop { block: id } |
-            ExprStmt { expr: id } |
-            UseDecl { use_tree: id , ..} |
-            TupleIndexExpression { tuple: id , .. } |
-            TypeSlice { ty: id } |
-            UsePath {tree: id , ..} => *id += offset,
-
-            Return { expr: optid } |
-            Break { expr: optid } => {
-                if let Some(id) = optid {
-                    *id += offset
-                }
-            }
-
-            Block { nodes: ids } |
-            Tuple { elements: ids } |
-            Array { elements: ids } |
-            PathExpression { segments: ids } |
-            TypePath { segments: ids } |
-            TypeTuple { elements: ids } |
-            UseGroup { trees: ids } |
-            PathSegment {args: ids , ..} => {
-                for id in ids {
-                    *id += offset;
-                }
-            }
-
-            Binary { lhs: id0, rhs: id1, .. } |
-            ArrayRepeat { value: id0, count: id1 } |
-            IndexExpression { array: id0 , index: id1 } |
-            TypeArray { ty: id0, len: id1 } => {
-                *id0 += offset;
-                *id1 += offset;
-            }
-            
-            Call { callee: id, args: ids } => {
-                *id += offset;
-                for id in ids {
-                    *id += offset;
-                }
-            }
-            
-            If { cond, then_block, else_block } => {
-                *cond += offset;
-                *then_block += offset;
-                if let Some(else_id) = else_block {
-                    *else_id += offset;
-                }
-            }
-            
-            LetStmt {ty: optid0, value: optid1 , ..} => {
-                if let Some(id) = optid0 {
-                    *id += offset
-                }
-                if let Some(id) = optid1 {
-                    *id += offset
-                }
-            }
-
-            Function { params, return_type: optid, body: id, ..} => {
-                *id += offset;
-                if let Some(id) = optid {
-                    *id += offset
-                }
-                for (_, id) in params {
-                    *id += offset
-                }
-            }
-
-            Module { items: optids , ..} => {
-                if let Some(ids) = optids {
-                    for id in ids {
-                        *id += offset
-                    }
-                }
-            }
-
-            _ => {}
+        for child_id in node.children_mut() {
+            *child_id += offset;
         }
     }
 }
@@ -201,10 +123,3 @@ fn resolve_module_path(base: &Path, name: &str) -> PathBuf {
         path
     }
 }
-
-fn resolve_module_dir(base: &Path, name: &str) -> PathBuf {
-    let mut dir = base.to_path_buf();
-    dir.push(name);
-    dir
-}
-

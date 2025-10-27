@@ -1,8 +1,8 @@
 
-// [X] lexer
+// [x] lexer
 // [/] parser
 // [/] expander
-// [ ] resolver
+// [/] resolver
 // [ ] validator
 // [ ] type checker
 // [ ] lowerer
@@ -17,6 +17,7 @@ mod lexer;
 mod parser;
 mod ast;
 mod expander;
+mod resolver;
 
 type CResult<T> = Result<T, CompilerError>;
 #[derive(Debug)]
@@ -49,20 +50,23 @@ trait ToCompileResult<T> {
     fn into_cresult(self) -> CResult<T>;
 }
 
-
 pub fn compile(file_path: impl AsRef<Path>) -> Result<(), CompilerError> {
-    let tokens = lexer::lex_file(&file_path).map_err(|err| CompilerError::IoError(err))?.into_cresult()?;
+    let src = std::fs::read_to_string(&file_path)
+        .map_err(|e| CompilerError::IoError(e))?;
+
+    let tokens = lexer::lex_all(&src).into_cresult()?;
 
     let mut ast = parser::parse_tokens(tokens).into_cresult()?;
 
     let mut expander = expander::Expander::new(&mut ast, file_path.as_ref().parent().unwrap(), |src| {
-        let mut lexer = lexer::Lexer::new(src);
-        lexer.lex_all().into_cresult()
+        lexer::lex_all(src).into_cresult()
     }, |tokens| {
         parser::parse_tokens(tokens).into_cresult()
     });
-
     expander.expand_modules()?;
+
+    let mut resolver = resolver::Resolver::new(&ast);
+    let result = resolver.resolve();
 
     todo!()
 }
