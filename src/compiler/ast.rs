@@ -26,7 +26,7 @@ pub enum NodeKind {
     ArrayRepeat { value: NodeId, count: NodeId },
     UnderscoreExpr,
     IndexExpression { array: NodeId , index: NodeId },
-    TupleIndexExpression { tuple: NodeId , index: i32 },
+    TupleIndexExpression { tuple: NodeId , index: u32 },
     PathExpression { segments: Vec<NodeId> },
     ErrorExpr,
     
@@ -282,7 +282,7 @@ impl Node {
 
 #[derive(Debug, Clone)]
 pub enum Literal {
-    Int(i32),
+    Int(u32),
     Float(f64),
     Bool(bool),
     Str(String),

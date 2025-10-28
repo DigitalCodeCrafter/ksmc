@@ -45,7 +45,7 @@ Expression      = LiteralExpression
                 | LoopExpression
                 | ArrayExpression
                 | IndexExpression
-                | TupleExpressions
+                | TupleExpression
                 | TupleIndexExpression
                 | BlockExpression
                 ;

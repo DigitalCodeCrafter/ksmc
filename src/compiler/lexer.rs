@@ -1,5 +1,5 @@
 // Source text -> Tokens
-use crate::compiler::{ast::{Pos, Span}, CompilerError, ToCompileResult};
+use crate::compiler::{ast::{Pos, Span}, CompilerError};
 
 const CASE_SENSITIVITY: bool = true;
 
@@ -8,10 +8,9 @@ pub struct LexError {
     pub span: Span,
     pub message: String,
 }
-
-impl<T> ToCompileResult<T> for Result<T, Vec<LexError>> {
-    fn into_cresult(self) -> Result<T, super::CompilerError> {
-        self.map_err(|err| CompilerError::LexError(err))
+impl From<Vec<LexError>> for CompilerError {
+    fn from(value: Vec<LexError>) -> Self {
+        CompilerError::LexError(value)
     }
 }
 
@@ -19,7 +18,7 @@ impl<T> ToCompileResult<T> for Result<T, Vec<LexError>> {
 pub enum TokenKind {
     // Identifiers and Literals
     Identifier(String),
-    Int(i32),
+    Int(u32),
     Float(f64),
     String(String),
 
@@ -90,7 +89,11 @@ pub struct Token {
 
 pub fn lex_all(src: &str) -> Result<Vec<Token>, Vec<LexError>> {
     let mut lexer = Lexer::new(&src);
-    lexer.lex_all()
+    if lexer.lex_all().is_ok() {
+        Ok(lexer.tokens)
+    } else {
+        Err(lexer.errors)
+    }
 }
 
 pub struct Lexer {
@@ -99,6 +102,7 @@ pub struct Lexer {
     errors: Vec<LexError>,
     line: usize,
     col: usize,
+    pub tokens: Vec<Token>
 }
 impl Lexer {
     pub fn new(input: &str) -> Self {
@@ -108,27 +112,25 @@ impl Lexer {
             errors: Vec::new(),
             line: 1,
             col: 1,
+            tokens: Vec::new(),
         }
     }
 
-    pub fn lex_all(&mut self) -> Result<Vec<Token>, Vec<LexError>> {
-        let mut tokens = Vec::new();
+    pub fn lex_all(&mut self) -> Result<(), &[LexError]> {
         loop {
-            let tok = self.next_token();
-            if matches!(tok.kind, TokenKind::EOF) {
-                tokens.push(tok); break;
-            } else {
-                tokens.push(tok);
+            self.next_token();
+            if matches!(self.tokens.last(), Some(Token { kind: TokenKind::EOF, .. })) {
+                break;
             }
         }
         if self.errors.is_empty() {
-            Ok(tokens)
+            Ok(())
         } else {
-            Err(self.errors.clone())
+            Err(&self.errors)
         }
     }
 
-    pub fn next_token(&mut self) -> Token {
+    fn next_token(&mut self) {
         self.skip_whitespace_and_comment();
 
         let start_line = self.line;
@@ -139,22 +141,20 @@ impl Lexer {
         };
 
         if c.is_alphabetic() {
-            self.lex_identifier_or_keyword(start_line, start_col)
+            self.lex_identifier_or_keyword(start_line, start_col);
         } else if c.is_ascii_digit() {
-            self.lex_number(start_line, start_col)
+            self.lex_number(start_line, start_col);
         } else if c == '.' && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
-            self.lex_number(start_line, start_col)
-        } else if c == '-' && self.peek_ahead(1).map_or(false, |n| n.is_ascii_digit()) {
-            self.lex_number(start_line, start_col)
+            self.lex_number(start_line, start_col);
         } else if c == '"' {
-            self.lex_string(start_line, start_col)
+            self.lex_string(start_line, start_col);
         } else {
-            self.lex_symbol(start_line, start_col)
+            self.lex_symbol(start_line, start_col);
         }
     }
 
-    fn make_token(&self, kind: TokenKind, line: usize, col: usize) -> Token {
-        Token { kind, span: self.make_span(line, col) }
+    fn make_token(&mut self, kind: TokenKind, line: usize, col: usize) {
+        self.tokens.push(Token { kind, span: self.make_span(line, col) });
     }
 
     fn make_span(&self, line: usize, col: usize) -> Span {
@@ -232,7 +232,7 @@ impl Lexer {
 
     // --------- Identifiers & Keywords ---------
 
-    fn lex_identifier_or_keyword(&mut self, line: usize, col: usize) -> Token {
+    fn lex_identifier_or_keyword(&mut self, line: usize, col: usize) {
         let mut s = String::new();
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' {
@@ -271,7 +271,7 @@ impl Lexer {
 
     // --------- Numbers ---------
 
-    fn lex_number(&mut self, line: usize, col: usize) -> Token {
+    fn lex_number(&mut self, line: usize, col: usize) {
         let mut num_str = String::new();
         let mut has_dot = false;
         let mut has_exp = false;
@@ -338,7 +338,7 @@ impl Lexer {
         self.make_token(kind, line, col)
     }
 
-    fn lex_based_number(&mut self, base: u32,line: usize, col: usize) -> Token {
+    fn lex_based_number(&mut self, base: u32,line: usize, col: usize) {
         let mut s = String::new();
         while let Some(c) = self.peek() {
             match c {
@@ -363,13 +363,13 @@ impl Lexer {
         }
 
         let cleaned = s.replace("_", "");
-        let value = i32::from_str_radix(&cleaned, base).unwrap_or(0);
+        let value = u32::from_str_radix(&cleaned, base).unwrap_or(0);
         self.make_token(TokenKind::Int(value), line, col)
     }
 
     // --------- Strings ---------
 
-    fn lex_string(&mut self, line: usize, col: usize) -> Token {
+    fn lex_string(&mut self, line: usize, col: usize) {
         self.advance(); // consume '"'
         let mut s = String::new();
 
@@ -403,7 +403,7 @@ impl Lexer {
 
     // --------- Symbols & Operators ---------
 
-    fn lex_symbol(&mut self, line: usize, col: usize) -> Token {
+    fn lex_symbol(&mut self, line: usize, col: usize) {
         use TokenKind::*;
         let c = self.advance().unwrap();
 
@@ -478,7 +478,8 @@ mod tests {
         let mut lexer = Lexer::new(src);
         let mut i = 0;
         loop {
-            let tok = lexer.next_token();
+            lexer.next_token();
+            let tok = lexer.tokens.last().unwrap();
             println!("{:?}", tok);
             assert_eq!(tok.kind, expected[i]);
             if matches!(tok.kind, TokenKind::EOF) { break; }
@@ -500,7 +501,8 @@ mod tests {
         let mut lexer = Lexer::new(src);
         let mut i = 0;
         loop {
-            let tok = lexer.next_token();
+            lexer.next_token();
+            let tok = lexer.tokens.last().unwrap();
             println!("{:?}", tok);
             assert_eq!(tok.kind, expected[i]);
             if matches!(tok.kind, TokenKind::EOF) { break; }
@@ -521,7 +523,8 @@ mod tests {
         let mut lexer = Lexer::new(src);
         let mut i = 0;
         loop {
-            let tok = lexer.next_token();
+            lexer.next_token();
+            let tok = lexer.tokens.last().unwrap();
             println!("{:?}", tok);
             assert_eq!(tok.kind, expected[i]);
             if matches!(tok.kind, TokenKind::EOF) { break; }

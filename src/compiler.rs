@@ -3,7 +3,7 @@
 // [/] parser
 // [/] expander
 // [/] resolver
-// [ ] validator
+// [x] validator
 // [ ] type checker
 // [ ] lowerer
 // [ ] optimizer
@@ -18,8 +18,9 @@ mod parser;
 mod ast;
 mod expander;
 mod resolver;
+mod validator;
+mod type_checker;
 
-type CResult<T> = Result<T, CompilerError>;
 #[derive(Debug)]
 pub enum CompilerError {
     Error { text: String },
@@ -27,6 +28,8 @@ pub enum CompilerError {
     LexError(Vec<lexer::LexError>),
     ParseError(Vec<parser::ParseError>),
     ExpandError(expander::ExpandError),
+    ResolveError(Vec<resolver::ResolveError>),
+    ValidationError(Vec<validator::ValidationError>),
 
     IoError(std::io::Error),
 }
@@ -39,6 +42,8 @@ impl std::fmt::Display for CompilerError {
             LexError(err) => write!(f, "Error: {:?}", err),
             ParseError(err) => write!(f, "Error: {:?}", err),
             ExpandError(err) => write!(f, "Error: {:?}", err),
+            ResolveError(err) => write!(f, "Error: {:?}", err),
+            ValidationError(err) => write!(f, "Error: {:?}", err),
 
             IoError(e) => write!(f, "{}", e),
         }
@@ -46,27 +51,19 @@ impl std::fmt::Display for CompilerError {
 }
 impl std::error::Error for CompilerError {}
 
-trait ToCompileResult<T> {
-    fn into_cresult(self) -> CResult<T>;
-}
-
 pub fn compile(file_path: impl AsRef<Path>) -> Result<(), CompilerError> {
     let src = std::fs::read_to_string(&file_path)
         .map_err(|e| CompilerError::IoError(e))?;
 
-    let tokens = lexer::lex_all(&src).into_cresult()?;
+    let tokens = lexer::lex_all(&src)?;
 
-    let mut ast = parser::parse_tokens(tokens).into_cresult()?;
+    let mut ast = parser::parse_all(tokens)?;
 
-    let mut expander = expander::Expander::new(&mut ast, file_path.as_ref().parent().unwrap(), |src| {
-        lexer::lex_all(src).into_cresult()
-    }, |tokens| {
-        parser::parse_tokens(tokens).into_cresult()
-    });
-    expander.expand_modules()?;
+    expander::expand_all(&mut ast, file_path.as_ref().parent().unwrap())?;
 
-    let mut resolver = resolver::Resolver::new(&ast);
-    let result = resolver.resolve();
+    let symbols = resolver::resolve_all(&ast)?;
+   
+    validator::validate_all(&ast)?;
 
     todo!()
 }

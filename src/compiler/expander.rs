@@ -1,5 +1,5 @@
 use std::{collections::HashSet, path::{Path, PathBuf}};
-use crate::compiler::{ast::{Node, NodeId, NodeKind, AST}, lexer::Token, CompilerError, ToCompileResult};
+use crate::compiler::{ast::{Node, NodeId, NodeKind, AST}, lexer::Token, CompilerError};
 
 #[derive(Debug)]
 pub enum ExpandError {
@@ -7,10 +7,19 @@ pub enum ExpandError {
     NotFound(PathBuf),
     FileRead(PathBuf, std::io::Error),
 }
-impl<T> ToCompileResult<T> for Result<T, ExpandError> {
-    fn into_cresult(self) -> Result<T, super::CompilerError> {
-        self.map_err(|err| CompilerError::ExpandError(err))
+impl From<ExpandError> for CompilerError {
+    fn from(value: ExpandError) -> Self {
+        CompilerError::ExpandError(value)
     }
+}
+
+pub fn expand_all(ast: &mut AST, base_path: &Path) -> Result<(), CompilerError> {
+    let mut expander = Expander::new(ast, base_path, |src| {
+        super::lexer::lex_all(src).map_err(|e| e.into())
+    }, |tokens| {
+        super::parser::parse_all(tokens).map_err(|e| e.into())
+    });
+    expander.expand_modules()
 }
 
 pub struct Expander<'a> {
@@ -70,7 +79,7 @@ impl<'a> Expander<'a> {
 
     fn expand_module_file(&mut self, node_id: NodeId, path: &Path) -> Result<(), CompilerError> {
         if !path.exists() {
-            return Err(ExpandError::NotFound(path.to_path_buf())).into_cresult();
+            return Err(ExpandError::NotFound(path.to_path_buf()).into());
         }
 
         // already expanded
@@ -81,7 +90,7 @@ impl<'a> Expander<'a> {
 
         // read and parse
         let src = std::fs::read_to_string(path)
-            .map_err(|e| ExpandError::FileRead(path.to_path_buf(), e)).into_cresult()?;
+            .map_err(|e| ExpandError::FileRead(path.to_path_buf(), e))?;
 
         let tokens = (self.lexer)(&src)?;
         let mut parsed_ast = (self.parser)(tokens)?;

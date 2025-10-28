@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use crate::compiler::ast::{NodeKind, AST};
+use crate::compiler::{CompilerError, ast::{AST, NodeId, NodeKind}};
 
-type NodeId = usize;
 type ScopeId = usize;
 type SymbolId = usize;
 
 #[derive(Debug, Clone)]
-enum ResolveError {
+pub enum ResolveError {
     UnresolvedPath {
         path: Vec<String>,
         scope: ScopeId,
@@ -14,6 +13,16 @@ enum ResolveError {
     UnresolvedName {
         name: String,
         scope: ScopeId,
+    },
+    PrivateSymbol {
+        path: Vec<String>,
+        symbol: SymbolId,
+        from_scope: ScopeId,
+    },
+}
+impl From<Vec<ResolveError>> for CompilerError {
+    fn from(value: Vec<ResolveError>) -> Self {
+        CompilerError::ResolveError(value)
     }
 }
 
@@ -83,22 +92,15 @@ pub struct Scope {
 }
 
 #[derive(Debug)]
-pub struct ResolveResult {
-    pub errors: Vec<ResolveError>,
-    pub symbols: Vec<Symbol>,
-    pub scopes: Vec<Scope>,
-}
-
-#[derive(Debug)]
 struct ResolverCache {
     /// (scope_id, name, namespace, from_scope) -> SymbolId
-    name_cache: HashMap<(ScopeId, String, Namespace, ScopeId), Option<SymbolId>>,
+    name_cache: HashMap<(ScopeId, String, Namespace, ScopeId), Result<SymbolId, ResolveError>>,
 
     /// (path_hash, from_scope, namespace) -> SymbolId
     path_cache: HashMap<(u64, ScopeId, Namespace), Result<SymbolId, ResolveError>>,
 
     /// (scope_id, use_decl_id, name) -> SymbolId
-    use_cache: HashMap<(ScopeId, NodeId, String), Option<SymbolId>>,
+    use_cache: HashMap<(ScopeId, NodeId, String), Option<Result<SymbolId, ResolveError>>>,
 }
 impl ResolverCache {
     fn new() -> Self {
@@ -111,6 +113,21 @@ impl ResolverCache {
 }
 
 #[derive(Debug)]
+pub struct SymbolTable {
+
+}
+
+pub fn resolve_all(ast: &AST) -> Result<SymbolTable, Vec<ResolveError>> {
+    let mut resolver = Resolver::new(ast);
+    
+    if resolver.resolve().is_ok() {
+        Ok(resolver.symbol_table)
+    } else {
+        Err(resolver.errors)
+    }
+}
+
+#[derive(Debug)]
 pub struct Resolver<'a> {
     ast: &'a AST,
     scopes: Vec<Scope>,
@@ -118,7 +135,9 @@ pub struct Resolver<'a> {
     root_scope: ScopeId,
     cache: ResolverCache,
     node_to_scope: HashMap<NodeId, ScopeId>,
-    pub bindings: HashMap<NodeId, SymbolId>,
+    bindings: HashMap<NodeId, SymbolId>,
+    errors: Vec<ResolveError>,
+    pub symbol_table: SymbolTable,
 }
 impl<'a> Resolver<'a> {
     pub fn new(ast: &'a AST) -> Self {
@@ -130,13 +149,13 @@ impl<'a> Resolver<'a> {
             cache: ResolverCache::new(),
             node_to_scope: HashMap::new(),
             bindings: HashMap::new(),
+            errors: Vec::new(),
+            symbol_table: SymbolTable {  }
         }
     }
 
-    pub fn resolve(&mut self) -> ResolveResult {
+    pub fn resolve(&mut self) -> Result<(), &[ResolveError]> {
         self.root_scope = self.new_scope(ScopeKind::Module, None);
-
-        let mut errors = Vec::new();
 
         self.build_scopes();
         
@@ -149,7 +168,7 @@ impl<'a> Resolver<'a> {
 
                     match self.resolve_path_from(&path, scope_id, Namespace::Value) {
                         Ok(sym_id) => { self.bindings.insert(node_id, sym_id); },
-                        Err(err) => errors.push(err),
+                        Err(err) => self.errors.push(err),
                     }
                 }
 
@@ -158,7 +177,7 @@ impl<'a> Resolver<'a> {
 
                     match self.resolve_path_from(&path, scope_id, Namespace::Type) {
                         Ok(sym_id) => { self.bindings.insert(node_id, sym_id); },
-                        Err(err) => errors.push(err),
+                        Err(err) => self.errors.push(err),
                     }
                 }
 
@@ -166,10 +185,11 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        ResolveResult {
-            errors,
-            symbols: self.symbols.clone(),
-            scopes: self.scopes.clone(),
+        
+        if self.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(&self.errors)
         }
     }
 }
@@ -338,7 +358,8 @@ impl<'a> Resolver<'a> {
             .collect()
     }
 
-    /// resolve a **path** starting at **from_scope** to a symbol in **namespace**
+    /// resolve a `path` starting at `from_scope` to a symbol in namespace `namespace` without using cache lookup.
+    /// Returns an error if the path couln't be resolved or the symbol is not visible
     fn resolve_path_uncached(&mut self, path: &[String], from_scope: ScopeId, namespace: Namespace) -> Result<SymbolId, ResolveError> {
         if path.is_empty() {
             return Err(ResolveError::UnresolvedPath { path: vec![], scope: from_scope });
@@ -357,30 +378,27 @@ impl<'a> Resolver<'a> {
             
             // lookup in current scope
             // Namespace::Type enforeced if not last segment
-            match self.lookup_in_scope(seg_name, current_scope,  if is_last { namespace } else { Namespace::Type }, from_scope) {
-                Some(sym_id) => {
-                    current_symbol = Some(sym_id);
+            let sym_id = self.lookup_in_scope(seg_name, current_scope,  if is_last { namespace } else { Namespace::Type }, from_scope)?;
+            if !self.symbol_is_visible_from(sym_id, from_scope) {
+                return Err(ResolveError::PrivateSymbol { path: path[..=i].to_vec(), symbol: sym_id, from_scope });
+            }
+            current_symbol = Some(sym_id);
 
-                    if !is_last {
-                        let sym = &self.symbols[sym_id];
-                        if let SymbolKind::Module = sym.kind {
-                            current_scope = sym.inner_scope.unwrap();
-                        } else {
-                            return Err(ResolveError::UnresolvedPath { path: path.to_vec(), scope: current_scope });
-                        }
-                    }
-                }
-
-                None => {
-                    return Err(ResolveError::UnresolvedName { name: seg_name.clone(), scope: current_scope });
+            if !is_last {
+                let sym = &self.symbols[sym_id];
+                if let SymbolKind::Module = sym.kind {
+                    current_scope = sym.inner_scope.unwrap();
+                } else {
+                    return Err(ResolveError::UnresolvedPath { path: path.to_vec(), scope: current_scope });
                 }
             }
         }
 
-        Ok(current_symbol.unwrap())
+        Ok(current_symbol.unwrap()) // safe as atleast one segment has to have been resolved
     }
 
-    /// resolve a **path** starting at **from_scope** to a symbol in **namespace**
+    /// resolve a `path` starting at `from_scope` to a symbol in namespace `namespace`.
+    /// Returns an error if the path couln't be resolved or the symbol is not visible
     fn resolve_path_from(&mut self, path: &[String], from_scope: ScopeId, namespace: Namespace) -> Result<SymbolId, ResolveError> {
         let path_hash = self.hash_path(path);
         if let Some(cached) = self.cache.path_cache.get(&(path_hash, from_scope, namespace)) {
@@ -399,9 +417,8 @@ impl<'a> Resolver<'a> {
         h.finish()
     }
 
-    /// looks up a symbol in namespace **ns** named **name** in the, with **scope_id** specified, scope
-    /// and checking if its visible from **from_scope**
-    fn lookup_in_scope_uncached(&mut self, name: &str, mut scope_id: ScopeId, ns: Namespace, from_scope: ScopeId) -> Option<SymbolId> {
+    /// looks up a symbol in namespace `ns` named `name` in `scope_id` from `from_scope` without using cache lookup
+    fn lookup_in_scope_uncached(&mut self, name: &str, mut scope_id: ScopeId, ns: Namespace, from_scope: ScopeId) -> Result<SymbolId, ResolveError> {
         loop {
             let table = match ns {
                 Namespace::Value => &self.scopes[scope_id].value_symbols,
@@ -409,16 +426,12 @@ impl<'a> Resolver<'a> {
             };
             
             if let Some(&sym_id) = table.get(name) {
-                if self.symbol_is_visible_from(sym_id, from_scope) {
-                    return Some(sym_id);
-                }
+                return Ok(sym_id);
             }
             
             // search uses
-            if let Some(sym_id) = self.lookup_via_uses(scope_id, name, ns, from_scope) {
-                if self.symbol_is_visible_from(sym_id, from_scope) {
-                    return Some(sym_id);
-                }
+            if let Some(result) = self.lookup_via_uses(scope_id, name, ns, from_scope) {
+                return result;
             }
             
             // drop scope
@@ -443,20 +456,23 @@ impl<'a> Resolver<'a> {
             break;
         }
 
-        None
+        Err(ResolveError::UnresolvedName { name: name.to_string(), scope: scope_id })
     }
 
-    fn lookup_in_scope(&mut self, name: &str, scope_id: ScopeId, ns: Namespace, from_scope: ScopeId) -> Option<SymbolId> {
+    /// looks up a symbol in namespace `ns` named `name` in `scope_id` from `from_scope`
+    fn lookup_in_scope(&mut self, name: &str, scope_id: ScopeId, ns: Namespace, from_scope: ScopeId) -> Result<SymbolId, ResolveError> {
         if let Some(cached) = self.cache.name_cache.get(&(scope_id, name.to_string(), ns, from_scope)) {
-            return *cached;
+            return cached.clone();
         }
 
         let result = self.lookup_in_scope_uncached(name, scope_id, ns, from_scope);
-        self.cache.name_cache.insert((scope_id, name.to_string(), ns, from_scope), result);
+        self.cache.name_cache.insert((scope_id, name.to_string(), ns, from_scope), result.clone());
         result
     }
 
-    fn lookup_via_single_use(&mut self, scope_id: ScopeId, use_binding: &UseBinding, name: &str, ns: Namespace) -> Option<SymbolId> {
+    /// check if `name` of namespace `ns` can be found through this `use_binding` in scope `scope_id`.
+    /// Returns an error if the use is invalid or the scope can't see the symbol.
+    fn lookup_via_single_use(&mut self, scope_id: ScopeId, use_binding: &UseBinding, name: &str, ns: Namespace) -> Option<Result<SymbolId, ResolveError>> {
         let mut stack = vec![(use_binding.use_decl, vec![])];
 
         while let Some((node_id, mut prefix)) = stack.pop() {
@@ -475,35 +491,45 @@ impl<'a> Resolver<'a> {
                     if ident == name {
                         let mut path = prefix;
                         path.push(ident.clone());
-                        if let Ok(sym_id) = self.resolve_path_from(&path, scope_id, ns) {
-                            return Some(sym_id);
-                        }
+                        return Some(self.resolve_path_from(&path, scope_id, ns));
                     }
                 }
                 NodeKind::UseRename { ident, name: alias } => {
                     if alias == name {
                         let mut path = prefix;
                         path.push(ident.clone());
-                        if let Ok(sym_id) = self.resolve_path_from(&path, scope_id, ns) {
-                            return Some(sym_id);
-                        }
+                        return Some(self.resolve_path_from(&path, scope_id, ns));
                     }
                 }
                 NodeKind::UseGlob => {
-                    if let Ok(target_sym) = self.resolve_path_from(&prefix, scope_id, Namespace::Type) {
-                        if let Some(target_scope) = self.symbols[target_sym].inner_scope {
-                            let table = match ns {
-                                Namespace::Value => &self.scopes[target_scope].value_symbols,
-                                Namespace::Type => &self.scopes[target_scope].type_symbols,
-                            };
-                            
-                            // check if the use declaration scope can see the symbol
-                            if let Some(&sym_id) = table.get(name) {
-                                if self.symbol_is_visible_from(sym_id, scope_id) {
-                                    return Some(sym_id);
-                                }
-                            }
-                        }
+                    let target_sym = match self.resolve_path_from(&prefix, scope_id, Namespace::Type) {
+                        Ok(sym_id) => sym_id,
+                        Err(err) => return Some(Err(err))
+                    };
+
+                    let Some(target_scope) = self.symbols[target_sym].inner_scope else {
+                        return Some(Err(ResolveError::UnresolvedPath {
+                            path: prefix.iter().cloned().chain(std::iter::once("*".to_string())).collect(),
+                            scope: scope_id,
+                        }));
+                    };
+
+                    let table = match ns {
+                        Namespace::Value => &self.scopes[target_scope].value_symbols,
+                        Namespace::Type => &self.scopes[target_scope].type_symbols,
+                    };
+                    
+                    // check if the use declaration scope can see the symbol
+                    if let Some(&sym_id) = table.get(name) {
+                        return Some(if self.symbol_is_visible_from(sym_id, scope_id) {
+                            Ok(sym_id)
+                        } else {
+                            Err(ResolveError::PrivateSymbol {
+                                path: prefix.iter().cloned().chain(std::iter::once(name.to_string())).collect(),
+                                symbol: sym_id,
+                                from_scope: scope_id,
+                            })
+                        })
                     }
                 }
                 _ => {}
@@ -513,12 +539,13 @@ impl<'a> Resolver<'a> {
         None
     }
 
-    /// try to find a symbol using the scopes use aliases \
-    /// **scope_id**: the scope of the use aliases \
-    /// **name**: the name of the symbol to find \
-    /// **ns**: what namespace the symbol resides in \
-    /// **from_scope**: the scope that is trying to find the symbol
-    fn lookup_via_uses(&mut self, scope_id: ScopeId, name: &str, ns: Namespace, from_scope: ScopeId) -> Option<SymbolId> {
+    /// try to find a symbol using the scopes use aliases
+    /// 
+    /// * `scope_id`: the scope of the use aliases \
+    /// * `name`: the name of the symbol to find \
+    /// * `ns`: what namespace the symbol resides in \
+    /// * `from_scope`: the scope that is trying to find the symbol
+    fn lookup_via_uses(&mut self, scope_id: ScopeId, name: &str, ns: Namespace, from_scope: ScopeId) -> Option<Result<SymbolId, ResolveError>> {
         // Quick check: has this query been seen before?
         let uses = self.scopes[scope_id].uses.clone();
         for use_binding in &uses {
@@ -526,13 +553,13 @@ impl<'a> Resolver<'a> {
                 let key = (scope_id, use_binding.use_decl, name.to_string());
                 if let Some(cached) = self.cache.use_cache.get(&key) {
                     if cached.is_some() {
-                        return *cached;
+                        return cached.clone();
                     }
                     continue;
                 }
 
                 let result = self.lookup_via_single_use(scope_id, use_binding, name, ns);
-                self.cache.use_cache.insert(key, result);
+                self.cache.use_cache.insert(key, result.clone());
                 if result.is_some() {
                     return result;
                 }
@@ -547,7 +574,7 @@ impl<'a> Resolver<'a> {
         sym.public || self.is_within(from_scope, sym.defining_scope)
     }
 
-    /// checks if **scope** is a descendant of **ancestor**
+    /// checks if `scope` is a descendant of `ancestor`
     fn is_within(&self, scope: ScopeId, ancestor: ScopeId) -> bool {
         let mut current = scope;
         loop {
@@ -562,8 +589,6 @@ impl<'a> Resolver<'a> {
         }
     }
 }
-
-// TODO: unit tests
 
 #[cfg(test)]
 mod tests {
@@ -659,12 +684,12 @@ mod tests {
         "#;
 
         let tokens = super::super::lexer::lex_all(&code).unwrap();
-        let ast = super::super::parser::parse_tokens(tokens).unwrap();
+        let ast = super::super::parser::parse_all(tokens).unwrap();
 
         let mut resolver = Resolver::new(&ast);
         let result = resolver.resolve();
 
-        assert!(result.errors.is_empty());
+        assert!(result.is_ok());
         let sym_x = resolver.bindings[&find_ident(&ast, "x", 1).unwrap()];
         let sym_x_ref = resolver.bindings[&find_ident(&ast, "x", 2).unwrap()];
         assert_eq!(sym_x, sym_x_ref, "x should resolve to same symbol");
@@ -683,12 +708,12 @@ mod tests {
         "#;
 
         let tokens = super::super::lexer::lex_all(&code).unwrap();
-        let ast = super::super::parser::parse_tokens(tokens).unwrap();
+        let ast = super::super::parser::parse_all(tokens).unwrap();
 
         let mut resolver = Resolver::new(&ast);
         let result = resolver.resolve();
 
-        assert!(result.errors.is_empty());
+        assert!(result.is_ok());
 
         let inner_x = resolver.bindings[&find_ident(&ast, "x", 2).unwrap()];
         let y_ref_x = resolver.bindings[&find_ident(&ast, "x", 3).unwrap()];
@@ -709,11 +734,12 @@ mod tests {
         "#;
 
         let tokens = super::super::lexer::lex_all(&code).unwrap();
-        let ast = super::super::parser::parse_tokens(tokens).unwrap();
+        let ast = super::super::parser::parse_all(tokens).unwrap();
 
         let mut resolver = Resolver::new(&ast);
-        let result = resolver.resolve();
-        assert_eq!(result.errors.len(), 1);
+        let errors = resolver.resolve().unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(&errors[0], ResolveError::PrivateSymbol { path, .. } if path == &["foo", "secret"]));
     }
 
     #[test]
@@ -731,10 +757,10 @@ mod tests {
         "#;
 
         let tokens = super::super::lexer::lex_all(&code).unwrap();
-        let ast = super::super::parser::parse_tokens(tokens).unwrap();
+        let ast = super::super::parser::parse_all(tokens).unwrap();
 
         let mut resolver = Resolver::new(&ast);
         let result = resolver.resolve();
-        assert!(result.errors.is_empty(), "{:#?}", result.errors);
+        assert!(result.is_ok());
     }
 }

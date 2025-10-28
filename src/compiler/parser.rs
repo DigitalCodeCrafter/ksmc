@@ -1,4 +1,4 @@
-use super::{ToCompileResult, CompilerError};
+use super::CompilerError;
 use super::lexer::{Token, TokenKind};
 use super::ast::*;
 
@@ -16,29 +16,30 @@ impl ParseError {
         }
     }
 }
-impl<T> ToCompileResult<T> for Result<T, Vec<ParseError>> {
-    fn into_cresult(self) -> Result<T, super::CompilerError> {
-        self.map_err(|err| CompilerError::ParseError(err))
+impl From<Vec<ParseError>> for CompilerError {
+    fn from(value: Vec<ParseError>) -> Self {
+        CompilerError::ParseError(value)
     }
 }
+
 type PResult<T> = Result<T, ParseError>;
 
-pub fn parse_tokens(tokens: Vec<Token>) -> Result<AST, Vec<ParseError>> {
+pub fn parse_all(tokens: Vec<Token>) -> Result<AST, Vec<ParseError>> {
     let mut parser = Parser::new(tokens);
     
-    match parser.parse_program() {
-        Ok(items) => Ok(AST { nodes: parser.arena, items }),
-        Err(_) => Err(parser.errors),
+    if parser.parse_program().is_ok() {
+        Ok(parser.ast)
+    } else {
+        Err(parser.errors)
     }
 }
-
 
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<ParseError>,
-    arena: Vec<Node>,
     pos_stack: Vec<Pos>,
+    pub ast: AST,
 }
 
 impl Parser {
@@ -47,18 +48,17 @@ impl Parser {
             tokens,
             pos: 0,
             errors: Vec::new(),
-            arena: Vec::new(),
+            ast: AST { nodes: Vec::new(), items: Vec::new() },
             pos_stack: Vec::new(),
         }
     }
 
-    pub fn parse_program(&mut self) -> Result<Vec<NodeId>, &[ParseError]> {
+    pub fn parse_program(&mut self) -> Result<(), &[ParseError]> {
         self.start_span();
-        let mut items = Vec::new();
 
         while !matches!(self.peek(), TokenKind::EOF) {
             match self.parse_item() {
-                Ok(item) => items.push(item),
+                Ok(item) => self.ast.items.push(item),
                 Err(err) => {
                     self.errors.push(err);
                     self.recover_to(&[TokenKind::Fn, TokenKind::EOF, TokenKind::Mod, TokenKind::Use], &[(TokenKind::LBrace, TokenKind::RBrace)]);
@@ -67,7 +67,7 @@ impl Parser {
         }
 
         if self.errors.is_empty() {
-            Ok(items)
+            Ok(())
         } else {
             Err(&self.errors)
         }
@@ -143,9 +143,9 @@ impl Parser {
     }
 
     fn push_node(&mut self, kind: NodeKind) -> PResult<NodeId> {
-        let id = self.arena.len();
+        let id = self.ast.nodes.len();
         let span = self.end_span()?;
-        self.arena.push(Node { kind, span });
+        self.ast.nodes.push(Node { kind, span });
         Ok(id)
     }
 }
@@ -971,6 +971,8 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    use crate::compiler::lexer;
+
     use super::*;
 
     #[test]
@@ -991,15 +993,13 @@ mod tests {
         let root = parser.parse_expression(0).unwrap();
 
         println!("AST Root Node ID: {:?}", root);
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
     }
 
     #[test]
     fn test_parse_block() {
-        use crate::compiler::lexer::Lexer;
-
         let src = r#"
             {
                 let x = 5;
@@ -1008,14 +1008,13 @@ mod tests {
             }
         "#;
 
-        let mut lexer = Lexer::new(src);
-        let tokens = lexer.lex_all().unwrap();
+        let tokens = lexer::lex_all(src).unwrap();
         
         let mut parser = Parser::new(tokens);
         let root = parser.parse_block_expression().unwrap();
 
         println!("AST Root Node ID: {:?}", root);
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
 
@@ -1024,8 +1023,6 @@ mod tests {
 
     #[test]
     fn test_parse_program() {
-        use crate::compiler::lexer::Lexer;
-
         let src = r#"
             fn main() {
                 fn local() -> Type { 1 + 5 }
@@ -1042,22 +1039,19 @@ mod tests {
             }
         "#;
 
-        let mut lexer = Lexer::new(src);
-        let tokens = lexer.lex_all().unwrap();
+        let tokens = lexer::lex_all(src).unwrap();
         
         let mut parser = Parser::new(tokens);
         let root = parser.parse_program().unwrap();
 
         println!("AST Root Node ID: {:?}", root);
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
     }
 
     #[test]
     fn test_parse_types() {
-        use crate::compiler::lexer::Lexer;
-
         let src = r#"
             fn main() {
                 fn local(x: Int) -> Int { x * 2 }
@@ -1066,22 +1060,19 @@ mod tests {
             }
         "#;
 
-        let mut lexer = Lexer::new(src);
-        let tokens = lexer.lex_all().unwrap();
+        let tokens = lexer::lex_all(src).unwrap();
         
         let mut parser = Parser::new(tokens);
         let root = parser.parse_program().unwrap();
 
         println!("AST Root Node ID: {:?}", root);
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
     }
 
     #[test]
     fn test_parse_items() {
-        use crate::compiler::lexer::Lexer;
-
         let src = r#"
             mod module;
 
@@ -1094,22 +1085,19 @@ mod tests {
             use module::{self, modules::*};
         "#;
 
-        let mut lexer = Lexer::new(src);
-        let tokens = lexer.lex_all().unwrap();
+        let tokens = lexer::lex_all(src).unwrap();
         
         let mut parser = Parser::new(tokens);
         let root = parser.parse_program().unwrap();
 
         println!("AST Root Node ID: {:?}", root);
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
     }
 
     #[test]
     fn test_errors() {
-        use crate::compiler::lexer::Lexer;
-
         let src = r#"
 fn main() {
     fn local() -> Type { + 5 }
@@ -1123,14 +1111,13 @@ fn main2() -> Int {
 }
         "#;
 
-        let mut lexer = Lexer::new(src);
-        let tokens = lexer.lex_all().unwrap();
+        let tokens = lexer::lex_all(src).unwrap();
         
         let mut parser = Parser::new(tokens);
         parser.parse_program().unwrap_err();
 
         println!("AST Arena:");
-        for (i, node) in parser.arena.iter().enumerate() {
+        for (i, node) in parser.ast.nodes.iter().enumerate() {
             println!("{:>2}: {:?}", i, node.kind);
         }
 
