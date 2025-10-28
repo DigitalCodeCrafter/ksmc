@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use crate::compiler::{CompilerError, ast::{AST, NodeId, NodeKind}};
 
-type ScopeId = usize;
-type SymbolId = usize;
+pub type ScopeId = usize;
+pub type SymbolId = usize;
 
 #[derive(Debug, Clone)]
 pub enum ResolveError {
@@ -250,6 +250,7 @@ impl<'a> Resolver<'a> {
 
                         // add parameters
                         for (param_name, _) in params.iter() {
+                            // FIXME: params shadow function in binding table due to same node_id
                             let param_sym = Symbol {
                                 name: param_name.clone(),
                                 kind: SymbolKind::Variable,

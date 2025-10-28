@@ -28,7 +28,7 @@ Statement       = ";"
                 | LetStatement
                 | ExpressionStatement ;
 
-LetStatement    = "let", [ "mut" ], Identifier, [ ":", Type ], "=", Expression, ";" ;
+LetStatement    = "let", [ "mut" ], Identifier, [ ":", Type ], [ "=", Expression ], ";";
 
 ExpressionStatement = Expression, ";" ;
 
