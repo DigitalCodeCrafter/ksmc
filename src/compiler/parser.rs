@@ -292,7 +292,7 @@ impl Parser {
             (TokenKind::Star, _) => self.push_node(NodeKind::UseGlob),
             (TokenKind::Identifier(ident), _) => {
                 let ident = ident.clone();
-
+                
                 match self.peek() {
                     TokenKind::ColCol => {
                         self.next();
@@ -303,9 +303,72 @@ impl Parser {
                         self.next();
                         let name = match self.next_with_span() {
                             (TokenKind::Identifier(name), _) => name.clone(),
-                            (TokenKind::Crate, _) => "crate".to_string(),
-                            (TokenKind::Super, _) => "super".to_string(),
-                            (TokenKind::SelfValue, _) => "self".to_string(),
+                            (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
+                        };
+                        self.push_node(NodeKind::UseRename { ident, name })
+                    }
+                    _ => {
+                        self.push_node(NodeKind::UseName { ident })
+                    }
+                }
+            }
+            (TokenKind::Crate, _) => {
+                let ident = "crate".to_string();
+                
+                match self.peek() {
+                    TokenKind::ColCol => {
+                        self.next();
+                        let tree = self.parse_use_tree()?;
+                        self.push_node(NodeKind::UsePath { ident, tree })
+                    }
+                    TokenKind::As => {
+                        self.next();
+                        let name = match self.next_with_span() {
+                            (TokenKind::Identifier(name), _) => name.clone(),
+                            (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
+                        };
+                        self.push_node(NodeKind::UseRename { ident, name })
+                    }
+                    _ => {
+                        self.push_node(NodeKind::UseName { ident })
+                    }
+                }
+            }
+            (TokenKind::Super, _) => {
+                let ident = "super".to_string();
+                
+                match self.peek() {
+                    TokenKind::ColCol => {
+                        self.next();
+                        let tree = self.parse_use_tree()?;
+                        self.push_node(NodeKind::UsePath { ident, tree })
+                    }
+                    TokenKind::As => {
+                        self.next();
+                        let name = match self.next_with_span() {
+                            (TokenKind::Identifier(name), _) => name.clone(),
+                            (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
+                        };
+                        self.push_node(NodeKind::UseRename { ident, name })
+                    }
+                    _ => {
+                        self.push_node(NodeKind::UseName { ident })
+                    }
+                }
+            }
+            (TokenKind::SelfValue, _) => {
+                let ident = "self".to_string();
+                
+                match self.peek() {
+                    TokenKind::ColCol => {
+                        self.next();
+                        let tree = self.parse_use_tree()?;
+                        self.push_node(NodeKind::UsePath { ident, tree })
+                    }
+                    TokenKind::As => {
+                        self.next();
+                        let name = match self.next_with_span() {
+                            (TokenKind::Identifier(name), _) => name.clone(),
                             (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
                         };
                         self.push_node(NodeKind::UseRename { ident, name })
