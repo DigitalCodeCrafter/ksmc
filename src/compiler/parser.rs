@@ -1098,7 +1098,7 @@ mod tests {
         let src = r#"
             fn main() {
                 fn local(x: Int) -> Int { x * 2 }
-                let mut x: [(List<Int>, Int); 3] = [(List(_), 923); 3];
+                let mut x: [(List<Int>, Int); 3] = [(List(local()), 923); 3];
                 x + 5 = x - 1;
             }
         "#;
