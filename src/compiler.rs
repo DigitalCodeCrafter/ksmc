@@ -1,10 +1,13 @@
+// TODO: centralized tables
 
 // [x] lexer
 // [/] parser
 // [/] expander
 // [/] resolver
 // [x] validator
+// [ ] constant evaluation ?
 // [ ] type checker
+// [x] KOS FORK WITH POINTERS!!
 // [ ] lowerer
 // [ ] optimizer
 // [ ] code generator

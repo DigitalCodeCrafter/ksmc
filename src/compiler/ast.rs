@@ -1,13 +1,23 @@
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(pub usize);
+
 #[derive(Debug, Clone)]
 pub struct AST {
     pub nodes: Vec<Node>,
     pub items: Vec<NodeId>,
 }
+impl AST {
+    pub fn get(&self, node: NodeId) -> Option<&Node> {
+        self.nodes.get(node.0)
+    }
+
+    pub fn get_mut(&mut self, node: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(node.0)
+    }
+}
 
 // --- AST Nodes ---
-
-pub type NodeId = usize;
 
 #[derive(Debug, Clone)]
 pub enum NodeKind {
@@ -24,14 +34,13 @@ pub enum NodeKind {
     Tuple { elements: Vec<NodeId> },
     Array { elements: Vec<NodeId> },
     ArrayRepeat { value: NodeId, count: NodeId },
-    UnderscoreExpr,
     IndexExpression { array: NodeId , index: NodeId },
     TupleIndexExpression { tuple: NodeId , index: u32 },
-    PathExpression { segments: Vec<NodeId> },
+    PathExpression { qself: Option<NodeId>, segments: Vec<NodeId> },
     ErrorExpr,
     
     // Types
-    TypePath { segments: Vec<NodeId> },
+    TypePath { qself: Option<NodeId>, segments: Vec<NodeId> },
     TypeTuple { elements: Vec<NodeId> },
     TypeArray { ty: NodeId, len: NodeId },
     TypeSlice { ty: NodeId },
@@ -79,8 +88,8 @@ impl NodeKind {
                         fn(&(String, NodeId)) -> NodeId
                     >
                 >
-            )
-
+            ),
+            PathChain(std::iter::Chain<std::iter::Copied<std::option::Iter<'a, NodeId>>, std::iter::Copied<std::slice::Iter<'a, NodeId>>>)
         }
 
         impl<'a> Iterator for Children<'a> {
@@ -95,6 +104,7 @@ impl NodeKind {
                     Children::Chain(i) => i.next(),
                     Children::ChainOpt(i) => i.next(),
                     Children::FuncChain(i) => i.next(),
+                    Children::PathChain(i) => i.next(),
                 }
             }
         }
@@ -113,8 +123,6 @@ impl NodeKind {
             Block { nodes: ids }
             | Tuple { elements: ids }
             | Array { elements: ids }
-            | PathExpression { segments: ids }
-            | TypePath { segments: ids }
             | TypeTuple { elements: ids }
             | UseGroup { trees: ids }
             | Module { items: Some(ids) , .. }
@@ -128,6 +136,11 @@ impl NodeKind {
             
             Call { callee: id, args: ids } => Children::Chain(std::iter::once(*id).chain(ids.iter().copied())),
             
+            PathExpression { qself: optid, segments: ids }
+            | TypePath { qself: optid, segments: ids } => Children::PathChain(
+                optid.iter().copied().chain(ids.iter().copied())
+            ),
+
             If { cond, then_block, else_block: Some(else_block) } => Children::Three(
                 [*cond, *then_block, *else_block].into_iter()
             ),
@@ -149,7 +162,6 @@ impl NodeKind {
             | Break { expr: None }
             | Module { items: None, .. }
             | Literal(_)
-            | UnderscoreExpr
             | ErrorExpr
             | ErrorType
             | EmptyStmt
@@ -182,8 +194,8 @@ impl NodeKind {
                         fn(&'a mut (String, NodeId)) -> &'a mut NodeId
                     >
                 >
-            )
-
+            ),
+            PathChain(std::iter::Chain<std::option::IterMut<'a, NodeId>,std::slice::IterMut<'a, NodeId>>)
         }
 
         impl<'a> Iterator for ChildrenMut<'a> {
@@ -198,6 +210,7 @@ impl NodeKind {
                     ChildrenMut::Chain(i) => i.next(),
                     ChildrenMut::ChainOpt(i) => i.next(),
                     ChildrenMut::FuncChain(i) => i.next(),
+                    ChildrenMut::PathChain(i) => i.next(),
                 }
             }
         }
@@ -216,8 +229,6 @@ impl NodeKind {
             Block { nodes: ids }
             | Tuple { elements: ids }
             | Array { elements: ids }
-            | PathExpression { segments: ids }
-            | TypePath { segments: ids }
             | TypeTuple { elements: ids }
             | UseGroup { trees: ids }
             | Module { items: Some(ids) , .. }
@@ -231,6 +242,11 @@ impl NodeKind {
             
             Call { callee: id, args: ids } => ChildrenMut::Chain(std::iter::once(id).chain(ids.iter_mut())),
             
+            PathExpression { qself: optid, segments: ids }
+            | TypePath { qself: optid, segments: ids } => ChildrenMut::PathChain(
+                optid.iter_mut().chain(ids.iter_mut())
+            ),
+
             If { cond, then_block, else_block: Some(else_block) } => ChildrenMut::Three(
                 [cond, then_block, else_block].into_iter()
             ),
@@ -252,13 +268,172 @@ impl NodeKind {
             | Break { expr: None }
             | Module { items: None, .. }
             | Literal(_)
-            | UnderscoreExpr
             | ErrorExpr
             | ErrorType
             | EmptyStmt
             | UseName { .. }
             | UseRename { .. }
             | UseGlob => ChildrenMut::None(std::iter::empty()),
+        }
+    }
+
+    pub fn is_expression(&self) -> bool {
+        // exhaustive to make sure an error gets reported if a new node kind is added
+        match self {
+            NodeKind::Literal(_)
+            | NodeKind::Unary { .. }
+            | NodeKind::Binary { .. }
+            | NodeKind::Call { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::If { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::Return { .. }
+            | NodeKind::Break { .. }
+            | NodeKind::Tuple { .. }
+            | NodeKind::Array { .. }
+            | NodeKind::ArrayRepeat { .. }
+            | NodeKind::IndexExpression { .. }
+            | NodeKind::TupleIndexExpression { .. }
+            | NodeKind::PathExpression { .. }
+            | NodeKind::ErrorExpr => true,
+
+            NodeKind::TypePath { .. }
+            | NodeKind::TypeTuple { .. }
+            | NodeKind::TypeArray { .. }
+            | NodeKind::TypeSlice { .. }
+            | NodeKind::ErrorType
+            | NodeKind::PathSegment { .. }
+            | NodeKind::LetStmt { .. }
+            | NodeKind::ExprStmt { .. }
+            | NodeKind::EmptyStmt
+            | NodeKind::Function { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::UseDecl { .. }
+            | NodeKind::UsePath { .. }
+            | NodeKind::UseGroup { .. }
+            | NodeKind::UseName { .. }
+            | NodeKind::UseRename { .. }
+            | NodeKind::UseGlob => false,
+        }
+    }
+
+    pub fn is_statement(&self) -> bool {
+        // exhaustive to make sure an error gets reported if a new node kind is added
+        match self {
+            NodeKind::LetStmt { .. }
+            | NodeKind::ExprStmt { .. }
+            | NodeKind::EmptyStmt
+            | NodeKind::Function { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::UseDecl { .. } => true,
+
+            NodeKind::Literal(_)
+            | NodeKind::Unary { .. }
+            | NodeKind::Binary { .. }
+            | NodeKind::Call { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::If { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::Return { .. }
+            | NodeKind::Break { .. }
+            | NodeKind::Tuple { .. }
+            | NodeKind::Array { .. }
+            | NodeKind::ArrayRepeat { .. }
+            | NodeKind::IndexExpression { .. }
+            | NodeKind::TupleIndexExpression { .. }
+            | NodeKind::PathExpression { .. }
+            | NodeKind::ErrorExpr
+            | NodeKind::TypePath { .. }
+            | NodeKind::TypeTuple { .. }
+            | NodeKind::TypeArray { .. }
+            | NodeKind::TypeSlice { .. }
+            | NodeKind::ErrorType
+            | NodeKind::PathSegment { .. }
+            | NodeKind::UsePath { .. }
+            | NodeKind::UseGroup { .. }
+            | NodeKind::UseName { .. }
+            | NodeKind::UseRename { .. }
+            | NodeKind::UseGlob => false,
+        }
+    }
+
+    pub fn is_type(&self) -> bool {
+        // exhaustive to make sure an error gets reported if a new node kind is added
+        match self {
+            NodeKind::TypePath { .. }
+            | NodeKind::TypeTuple { .. }
+            | NodeKind::TypeArray { .. }
+            | NodeKind::TypeSlice { .. }
+            | NodeKind::ErrorType => true,
+
+            NodeKind::Literal(_)
+            | NodeKind::Unary { .. }
+            | NodeKind::Binary { .. }
+            | NodeKind::Call { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::If { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::Return { .. }
+            | NodeKind::Break { .. }
+            | NodeKind::Tuple { .. }
+            | NodeKind::Array { .. }
+            | NodeKind::ArrayRepeat { .. }
+            | NodeKind::IndexExpression { .. }
+            | NodeKind::TupleIndexExpression { .. }
+            | NodeKind::PathExpression { .. }
+            | NodeKind::ErrorExpr
+            | NodeKind::PathSegment { .. }
+            | NodeKind::LetStmt { .. }
+            | NodeKind::ExprStmt { .. }
+            | NodeKind::EmptyStmt
+            | NodeKind::Function { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::UseDecl { .. }
+            | NodeKind::UsePath { .. }
+            | NodeKind::UseGroup { .. }
+            | NodeKind::UseName { .. }
+            | NodeKind::UseRename { .. }
+            | NodeKind::UseGlob => false,
+        }
+    }
+
+    pub fn is_item(&self) -> bool {
+        // exhaustive to make sure an error gets reported if a new node kind is added
+        match self {
+            NodeKind::Function { .. }
+            | NodeKind::Module { .. }
+            | NodeKind::UseDecl { .. } => true,
+            
+            NodeKind::Literal(_)
+            | NodeKind::Unary { .. }
+            | NodeKind::Binary { .. }
+            | NodeKind::Call { .. }
+            | NodeKind::Block { .. }
+            | NodeKind::If { .. }
+            | NodeKind::Loop { .. }
+            | NodeKind::Return { .. }
+            | NodeKind::Break { .. }
+            | NodeKind::Tuple { .. }
+            | NodeKind::Array { .. }
+            | NodeKind::ArrayRepeat { .. }
+            | NodeKind::IndexExpression { .. }
+            | NodeKind::TupleIndexExpression { .. }
+            | NodeKind::PathExpression { .. }
+            | NodeKind::ErrorExpr
+            | NodeKind::TypePath { .. }
+            | NodeKind::TypeTuple { .. }
+            | NodeKind::TypeArray { .. }
+            | NodeKind::TypeSlice { .. }
+            | NodeKind::ErrorType
+            | NodeKind::PathSegment { .. }
+            | NodeKind::LetStmt { .. }
+            | NodeKind::ExprStmt { .. }
+            | NodeKind::EmptyStmt
+            | NodeKind::UsePath { .. }
+            | NodeKind::UseGroup { .. }
+            | NodeKind::UseName { .. }
+            | NodeKind::UseRename { .. }
+            | NodeKind::UseGlob => false,
         }
     }
 }
@@ -296,10 +471,10 @@ pub enum UnaryOp {
 
 #[derive(Debug, Clone, Copy)]
 pub enum BinaryOp {
-    Add, Sub, Mul, Div,
-    Eq, Ne, Lt, Gt, Le, Ge,
-    And, Or,
-    Assign,
+    Add, Sub, Mul, Div,     // +, -, *, /
+    Eq, Ne, Lt, Gt, Le, Ge, // ==, !=, <, >, <=, >=
+    And, Or,                // &&, ||
+    Assign,                 // =
 }
 
 #[derive(Debug, Clone, Copy)]

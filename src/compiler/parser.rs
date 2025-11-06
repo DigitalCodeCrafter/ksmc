@@ -146,7 +146,7 @@ impl Parser {
         let id = self.ast.nodes.len();
         let span = self.end_span()?;
         self.ast.nodes.push(Node { kind, span });
-        Ok(id)
+        Ok(NodeId(id))
     }
 }
 
@@ -303,6 +303,9 @@ impl Parser {
                         self.next();
                         let name = match self.next_with_span() {
                             (TokenKind::Identifier(name), _) => name.clone(),
+                            (TokenKind::Crate, _) => "crate".to_string(),
+                            (TokenKind::Super, _) => "super".to_string(),
+                            (TokenKind::SelfValue, _) => "self".to_string(),
                             (other, span) => return Err(ParseError::new(span, format!("expected alias name, found {:?}", other))),
                         };
                         self.push_node(NodeKind::UseRename { ident, name })
@@ -484,12 +487,8 @@ impl Parser {
             // Path expression
             (TokenKind::Identifier(_), _) => self.parse_path_expression(),
 
-            // Underscore expression
-            (TokenKind::Underscore, _) => {
-                self.start_span();
-                self.next();
-                self.push_node(NodeKind::UnderscoreExpr)
-            }
+            // Qualified Path
+            (TokenKind::Lt, _) => self.parse_qualified_expression_path(),
 
             // Unary ops
             (TokenKind::Minus | TokenKind::Not, _) => {
@@ -746,28 +745,82 @@ impl Parser {
     fn parse_path_expression(&mut self) -> PResult<NodeId> {
         self.start_span();
 
+        let segments = self.parse_path_segments(true)?;
+
+        self.push_node(NodeKind::PathExpression { qself: None, segments })
+    }
+
+    fn parse_path_segments(&mut self, require_turbofish: bool) -> PResult<Vec<NodeId>> {
         let mut segments = Vec::new();
 
         loop {
             self.start_span();
             let ident = match self.next_with_span() {
                 (TokenKind::Identifier(ident), _) => ident.clone(),
+                (TokenKind::Crate, _) => "crate".to_string(),
+                (TokenKind::Super, _) => "super".to_string(),
+                (TokenKind::SelfType, _) => "Self".to_string(),
+                (TokenKind::SelfValue, _) => "self".to_string(),
                 (other, span) => {
                     let msg = format!("expected identifier, found {:?}", other);
                     self.error(span, msg);
                     break; // pretend the path has already ended
                 },
             };
-            segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?); // TODO: generics
 
+            let mut skiped_colcol = false;
             if matches!(self.peek(), TokenKind::ColCol) {
+                // new segment or turbofish
                 self.next();
-            } else {
+                skiped_colcol = true;
+            } else if require_turbofish {
+                // end of path
+                segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?);
                 break;
+            }
+
+            if matches!(self.peek(), TokenKind::Lt) {
+                // with generics
+                let args = self.parse_generics()?;
+                segments.push(self.push_node(NodeKind::PathSegment { ident, args })?);
+
+                // a '::' might have been used for a turbofish, check again
+                if matches!(self.peek(), TokenKind::ColCol) {
+                    self.next();
+                } else {
+                    break;
+                }
+            } else {
+                // without generics, new path segment
+                segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?);
+                
+                // '::' already checked
+                if !skiped_colcol { break; }
             }
         }
 
-        self.push_node(NodeKind::PathExpression { segments })
+        return Ok(segments);
+    }
+
+    fn parse_qualified_expression_path(&mut self) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::Lt)?;
+
+        let qself = self.parse_type()?;
+
+        let mut segments;
+
+        if matches!(self.peek(), TokenKind::Gt) {
+            self.soft_expect(TokenKind::ColCol);
+            segments = Vec::new();
+        } else {
+            self.soft_expect(TokenKind::As);
+            segments = self.parse_path_segments(false)?;
+        }
+
+        segments.extend(self.parse_path_segments(true)?);
+
+        self.push_node(NodeKind::PathExpression { qself: Some(qself), segments })
     }
 }
 
@@ -831,6 +884,8 @@ impl Parser {
         match self.peek_with_span() {
             (TokenKind::Identifier(_), _) => self.parse_type_path(),
 
+            (TokenKind::Lt, _) => self.parse_qualified_type_path(),
+
             (TokenKind::LBracket, _) => self.parse_type_array_or_slice(),
 
             (TokenKind::LParen, _) => self.parse_type_tuple_or_parenth(),
@@ -848,52 +903,40 @@ impl Parser {
     fn parse_type_path(&mut self) -> PResult<NodeId> {
         self.start_span();
 
-        let mut segments = Vec::new();
+        let segments = self.parse_path_segments(false)?;
 
-        loop {
-            self.start_span();
-            let ident = match self.next_with_span() {
-                (TokenKind::Identifier(ident), _) => ident.clone(),
-                (other, span) => {
-                    let msg = format!("expected identifier, found {:?}", other);
-                    self.error(span, msg);
-                    break; // pretend the path has already ended
-                },
-            };
-            
-            let mut skipped_colcol = false;
-            if matches!(self.peek(), TokenKind::ColCol) {
-                self.next();
-                skipped_colcol = true;
-            }
-            
-            if matches!(self.peek(), TokenKind::Lt) {
-                let args = self.parse_type_generics()?;
-                segments.push(self.push_node(NodeKind::PathSegment { ident, args })?);
-
-                if matches!(self.peek(), TokenKind::ColCol) {
-                    self.next();
-                } else {
-                    break;
-                }
-            } else {
-                segments.push(self.push_node(NodeKind::PathSegment { ident, args: vec![] })?);
-
-                // check already done
-                if !skipped_colcol { break; }
-            }
-        }
-
-        self.push_node(NodeKind::TypePath { segments })
+        self.push_node(NodeKind::TypePath { qself: None, segments })
     }
 
-    fn parse_type_generics(&mut self) -> PResult<Vec<NodeId>> {
+    fn parse_qualified_type_path(&mut self) -> PResult<NodeId> {
+        self.start_span();
+        self.expect(TokenKind::Lt)?;
+
+        let qself = self.parse_type()?;
+
+        let mut segments;
+
+        if matches!(self.peek(), TokenKind::Gt) {
+            self.soft_expect(TokenKind::ColCol);
+            segments = Vec::new();
+        } else {
+            self.soft_expect(TokenKind::As);
+            segments = self.parse_path_segments(false)?;
+        }
+
+        segments.extend(self.parse_path_segments(false)?);
+
+        self.push_node(NodeKind::PathExpression { qself: Some(qself), segments })
+    }
+
+    fn parse_generics(&mut self) -> PResult<Vec<NodeId>> {
         self.expect(TokenKind::Lt)?;
 
         let mut args = Vec::new();
 
         if !matches!(self.peek(), TokenKind::Gt) {
             loop {
+                // only types for now
                 match self.parse_type() {
                     Ok(ty) => args.push(ty),
                     Err(err) => {

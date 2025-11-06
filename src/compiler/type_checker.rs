@@ -1,205 +1,196 @@
 
-pub type TypeId = usize;
+// CURRENT GOAL: a typevisiter for primitive types and type inferrence
+// primitive types include
+// integers, floats, booleans, strings, arrays, tuples, unit, function
 
-#[derive(Debug)]
-pub enum UnifyError {
-    Mismatch(TypeId, TypeId),
+// Plan:
+// Use Type variables for unknowns
+// collect constraints
+// unify vars and types
+
+// exclude for now:
+// generics, user types
+
+// Validify:
+// exactly one concrete type for every var
+// evaluate types of all expressions
+// bools in if statements
+// function parameters
+// mutability
+
+// Algorithm:
+// start at items
+// for every node in worklist:
+// - collect constraints
+// - if a required var isn't found, add to worklist and reshcedule
+// resolve constraints
+
+use std::collections::HashMap;
+
+use crate::compiler::{ast::{AST, BinaryOp, Literal, NodeId, NodeKind, UnaryOp}, resolver::{SymbolId, SymbolTable}};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TypeVarId(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ConstraintId(usize);
+
+enum Type {
+    Int,
+    Float,
+    Bool,
+    String,
+    Array { elem: Box<Type>, len: u32 },
+    Tuple(Vec<Type>),
+    Unit,
+    Func { params: Vec<Type>, ret: Box<Type> }
 }
 
-mod env {
-    use std::collections::HashMap;
-    use crate::compiler::resolver::SymbolId;
-    use super::{TypeId, UnifyError};
+enum TypeVarKind {
+    Unknown
+}
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    pub enum TypeKind {
-        /// Built-in primitive type
-        Primitive(String),
+struct TypeVar {
+    kind: TypeVarKind,
+}
 
-        // User-defined type (structs, enums, aliases)
-        User(SymbolId),
+enum Constraint {
+    // validate equality
+    Equal(TypeVarId, TypeVarId),    // a == b
+    // validate consistency
+    Resolved(TypeVarId, Type),      // a == primitive
+    // validate possibility
+    BinaryOp { op: BinaryOp, lhs: TypeVarId, rhs: TypeVarId, out: TypeVarId },  // c == a (+ | > | && ...) b
+    // valdidate possibility
+    UnaryOp { op: UnaryOp, expr: TypeVarId, out: TypeVarId },                   // b == (! | -) a
+    // validate indexable
+    Indexing { indexee: TypeVarId, index: TypeVarId, out: TypeVarId },          // c == a[b]
+    // validate tuple
+    TupleIndexing { indexee: TypeVarId, index: u32, out: TypeVarId },           // c == a.idx
+}
 
-        /// Type variable (for inferrence)
-        Var(u32),
+struct TypeChecker<'a> {
+    ast: &'a AST,
+    symbols: &'a SymbolTable,
+    vars: Vec<TypeVar>,
+    constraints: Vec<Constraint>,
+    node_types: HashMap<NodeId, TypeVarId>,
+    symbol_types: HashMap<SymbolId, TypeVarId>,
 
-        /// Function type: (params) -> return
-        Function {
-            params: Vec<TypeId>,
-            ret: TypeId
-        },
-
-        /// Tuple type: (T1, T2, ...)
-        Tuple(Vec<TypeId>),
-
-        /// Array type: [T; N]
-        Array {
-            elem: TypeId,
-            len: Option<u32>
-        },
-
-        /// Generic instantiation: e.g. Option<T>, Vec<T>
-        Generic {
-            base: TypeId,
-            args: Vec<TypeId>
-        },
-    }
-
-    pub struct TypeEnv {
-        arena: Vec<TypeKind>,
-        subst: HashMap<u32, TypeId>,            // type var -> resolved type
-        builtins: HashMap<String, TypeId>,      // "i32" -> TypeId
-        interned: HashMap<TypeKind, TypeId>,    // type interning
-        next_var: u32,
-    }
-
-    impl TypeEnv {
-        pub fn new() -> Self {
-            let mut env = TypeEnv {
-                arena: Vec::new(),
-                subst: HashMap::new(),
-                builtins: HashMap::new(),
-                interned: HashMap::new(),
-                next_var: 0,
-            };
-
-            for name in ["i32", "f64", "bool", "str", "unit"] {
-                env.intern_builtin(name);
-            }
-
-            env
-        }
-
-        fn intern_builtin(&mut self, name: &str) -> TypeId {
-            let ty = TypeKind::Primitive(name.to_string());
-            let id = self.intern(ty.clone());
-            self.builtins.insert(name.to_string(), id);
-            id
-        }
-
-        pub fn intern(&mut self, ty: TypeKind) -> TypeId {
-            if let Some(&id) = self.interned.get(&ty) {
-                return id;
-            }
-            let id = self.arena.len();
-            self.arena.push(ty.clone());
-            self.interned.insert(ty, id);
-            id
-        }
-
-        pub fn new_var(&mut self) -> TypeId {
-            let id = self.next_var;
-            self.next_var += 1;
-            self.intern(TypeKind::Var(id))
-        }
-
-        pub fn get(&self, id: TypeId) -> &TypeKind {
-            &self.arena[id]
-        }
-
-        pub fn get_builtin(&self, name: &str) -> Option<TypeId> {
-            self.builtins.get(name).copied()
-        }
-
-        pub fn normalize(&mut self, ty: TypeId) -> TypeId {
-            match &self.get(ty) {
-                TypeKind::Var(v) => {
-                    let v = *v;
-                    if let Some(resolved) = self.subst.get(&v) {
-                        let normalized = self.normalize(*resolved);
-
-                        self.subst.insert(v, normalized);
-                        normalized
-                    } else {
-                        ty
-                    }
-                }
-                _ => ty,
-            }
-        }
-
-        pub fn unify(&mut self, a: TypeId, b: TypeId) -> Result<TypeId, UnifyError> {
-            let a = self.normalize(a);
-            let b = self.normalize(b);
-
-            if a == b {
-                return Ok(a);
-            }
-
-            match (self.get(a).clone(), self.get(b).clone()) {
-                // unify type variables
-                (TypeKind::Var(va), _) => {
-                    self.subst.insert(va, b);
-                    Ok(b)
-                }
-                (_, TypeKind::Var(vb)) => {
-                    self.subst.insert(vb, a);
-                    Ok(a)
-                }
-
-                // unify functions
-                (
-                    TypeKind::Function { params: pa, ret: ra },
-                    TypeKind::Function { params: pb, ret: rb }
-                ) => {
-                    if pa.len() != pb.len() {
-                        return Err(UnifyError::Mismatch(a, b));
-                    }
-                    for (ta, tb) in pa.iter().zip(pb.iter()) {
-                        self.unify(*ta, *tb)?;
-                    }
-                    self.unify(ra, rb)
-                }
-
-                // unify tuples
-                (TypeKind::Tuple(ta), TypeKind::Tuple(tb)) => {
-                    if ta.len() != tb.len() {
-                        return Err(UnifyError::Mismatch(a, b));
-                    }
-                    for (xa, xb) in ta.iter().zip(tb.iter()) {
-                        self.unify(*xa, *xb)?;
-                    }
-                    Ok(a)
-                }
-
-                // unify arrays
-                (
-                    TypeKind::Array { elem: ea, len: la },
-                    TypeKind::Array { elem: eb, len: lb },
-                ) if la == lb => self.unify(ea, eb),
-
-                // identical user types
-                (TypeKind::User(sa), TypeKind::User(sb)) if sa == sb => Ok(a),
-
-                // indetical primitives (failsafe)
-                (TypeKind::Primitive(na), TypeKind::Primitive(nb)) if na == nb => Ok(a),
-
-                _ => Err(UnifyError::Mismatch(a, b))
-            }
+    worklist: Vec<NodeId>,
+}
+impl<'a> TypeChecker<'a> {
+    fn new(ast: &'a AST, symbols: &'a SymbolTable) -> Self {
+        Self {
+            ast,
+            symbols,
+            vars: Vec::new(),
+            constraints: Vec::new(),
+            node_types: HashMap::new(),
+            symbol_types: HashMap::new(),
+            worklist: ast.items.clone(),
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
+    fn new_var(&mut self) -> TypeVarId {
+        let id = TypeVarId(self.vars.len());
+        self.vars.push(TypeVar { kind: TypeVarKind::Unknown });
+        id
+    }
 
-        #[test]
-        fn simple_inferrence() {
-            let mut tenv = TypeEnv::new();
+    fn push_constraint(&mut self, constraint: Constraint) -> ConstraintId {
+        let id = ConstraintId(self.constraints.len());
+        self.constraints.push(constraint);
+        id
+    }
 
-            let i32_t = tenv.get_builtin("i32").unwrap();
+    // bool for "try again later"
+    fn visit_expr(&mut self, node_id: NodeId) -> Result<bool, String> {
+        let Some(node) = self.ast.get(node_id) else { return Err(format!("{:?} does not exist", node_id)); };
+        if !node.kind.is_expression() { return Err(format!("{:?} is not an expression", node.kind)); }
 
-            let mut tvar_a = tenv.new_var();
-            let mut tvar_b = tenv.new_var();
+        // get or create var
+        let var = self.node_types
+            .get(&node_id)
+            .copied()
+            .unwrap_or_else(|| self.new_var());
 
-            // a = i32
-            tenv.unify(tvar_a, i32_t).unwrap();
-            // a = b
-            tenv.unify(tvar_b, tvar_a).unwrap();
-
-            tvar_a = tenv.normalize(tvar_a);
-            tvar_b = tenv.normalize(tvar_b);
-
-            assert_eq!(tenv.get(tvar_a), tenv.get(tvar_b))
+        if match &node.kind {
+            NodeKind::Literal(lit) => self.visit_literal(var, lit),
+            NodeKind::Unary { op, expr } => self.visit_unary(var, *op, *expr),
+            NodeKind::Binary { op, lhs, rhs } => self.visit_binary(var, *op, *lhs, *rhs),
+            NodeKind::Call { callee, args } => self.visit_call(var, *callee, args),
+            NodeKind::Block { nodes } => todo!("blocks"),
+            NodeKind::If { cond, then_block, else_block } => todo!("if"),
+            NodeKind::Loop { block } => todo!("if"),
+            NodeKind::Return { expr } => todo!("return"),
+            NodeKind::Break { expr } => todo!("break"),
+            NodeKind::Tuple { elements } => todo!("tuple"),
+            NodeKind::Array { elements } => todo!("array"),
+            NodeKind::ArrayRepeat { value, count } => todo!("array"),
+            NodeKind::IndexExpression { array, index } => todo!("index"),
+            NodeKind::TupleIndexExpression { tuple, index } => todo!("tupel idx"),
+            NodeKind::PathExpression { qself, segments } => todo!("vars"),
+            _ => false,
+        } {
+            return Ok(true);
         }
+
+        self.node_types.insert(node_id, var);
+        Ok(false)
+    }
+}
+
+impl<'a> TypeChecker<'a> {
+    fn visit_literal(&mut self, var: TypeVarId, lit: &Literal) -> bool {
+        let constraint = match lit {
+            Literal::Bool(_) => Constraint::Resolved(var, Type::Bool),
+            Literal::Int(_) => Constraint::Resolved(var, Type::Int),
+            Literal::Float(_) => Constraint::Resolved(var, Type::Float),
+            Literal::Str(_) => Constraint::Resolved(var, Type::String),
+        };
+
+        self.constraints.push(constraint);
+        false
+    }
+
+    fn visit_unary(&mut self, var: TypeVarId, op: UnaryOp, expr: NodeId) -> bool {
+        let ty = match self.node_types.get(&expr) {
+            Some(ty) => *ty,
+            None => {
+                self.worklist.push(expr);
+                return true;
+            }
+        };
+
+        self.constraints.push(Constraint::UnaryOp { op, expr: ty, out: var });
+        false
+    }
+
+    fn visit_binary(&mut self, var: TypeVarId, op: BinaryOp, lhs: NodeId, rhs: NodeId) -> bool {
+        let lty = match self.node_types.get(&lhs) {
+            Some(ty) => *ty,
+            None => {
+                self.worklist.push(lhs);
+                return true;
+            }
+        };
+        let rty = match self.node_types.get(&rhs) {
+            Some(ty) => *ty,
+            None => {
+                self.worklist.push(rhs);
+                return true;
+            }
+        };
+
+        self.constraints.push(Constraint::BinaryOp { op, lhs: lty, rhs: rty, out: var });
+        false
+    }
+
+    fn visit_call(&mut self, var: TypeVarId, calle: NodeId, args: &[NodeId]) -> bool {
+        todo!("function calls")
+        // plan: look up definition from symbol table and types
+        // equal constraints for arg types -> arg = param
+        // equal constraint for return type and var
     }
 }

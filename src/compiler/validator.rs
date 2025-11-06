@@ -48,7 +48,7 @@ impl<'a> AstValidator<'a> {
         let mut worklist = self.ast.items.clone();
 
         for item in &self.ast.items {
-            if !self.is_item(&self.ast.nodes[*item]) {
+            if !self.ast.nodes[item.0].kind.is_item() {
                 self.errors.push(ValidationError {
                     node_id: *item,
                     kind: ValidationErrorKind::NotAnItem(*item),
@@ -57,7 +57,7 @@ impl<'a> AstValidator<'a> {
         }
 
         while let Some(node_id) = worklist.pop() {
-            let node = &self.ast.nodes[node_id];
+            let node = &self.ast.nodes[node_id.0];
 
             self.check_node(node_id, node);
 
@@ -78,9 +78,8 @@ impl<'a> AstValidator<'a> {
             NodeKind::Literal(_)
             | NodeKind::EmptyStmt
             | NodeKind::UseGlob
-            | NodeKind::UseName { .. }
-            | NodeKind::UseRename { .. }
-            | NodeKind::UnderscoreExpr => {}
+            | NodeKind::UseName { ident: _ }
+            | NodeKind::UseRename { ident: _, name: _ } => {}
             NodeKind::ErrorExpr
             | NodeKind::ErrorType => {
                 self.errors.push(ValidationError {
@@ -88,7 +87,7 @@ impl<'a> AstValidator<'a> {
                     kind: ValidationErrorKind::PlaceholderNode(node_id)
                 });
             }
-            NodeKind::Unary { expr, .. } => {
+            NodeKind::Unary { expr, op: _ } => {
                 self.check_expression(node_id, *expr);
             }
             NodeKind::Binary { op, lhs, rhs } => {
@@ -96,7 +95,7 @@ impl<'a> AstValidator<'a> {
                 self.check_expression(node_id, *rhs);
 
                 if matches!(op, BinaryOp::Assign) {
-                    if !self.is_valid_lhs(&self.ast.nodes[*lhs]) {
+                    if !self.is_valid_lhs(&self.ast.nodes[lhs.0]) {
                         self.errors.push(ValidationError {
                             node_id,
                             kind: ValidationErrorKind::InvalidAssignmentLhs(*lhs)
@@ -113,7 +112,7 @@ impl<'a> AstValidator<'a> {
             NodeKind::Block { nodes } => {
                 if nodes.len() >= 2 {
                     for stmt in &nodes[..nodes.len() - 1] {
-                        if !self.is_statement(&self.ast.nodes[*stmt]) {
+                        if !self.ast.nodes[stmt.0].kind.is_statement() {
                             self.errors.push(ValidationError {
                                 node_id,
                                 kind: ValidationErrorKind::NotAStatement(*stmt)
@@ -121,9 +120,9 @@ impl<'a> AstValidator<'a> {
                         }
                     }
                 }
-                if let [.., last] = nodes.as_slice() {
-                    let node = &self.ast.nodes[*last];
-                    if !self.is_expression(node) && !self.is_statement(node) {
+                if let Some(last) = nodes.last() {
+                    let node = &self.ast.nodes[last.0];
+                    if !node.kind.is_expression() && !node.kind.is_statement() {
                         self.errors.push(ValidationError {
                             node_id,
                             kind: ValidationErrorKind::NotAnExpression(*last)
@@ -137,14 +136,14 @@ impl<'a> AstValidator<'a> {
             }
             NodeKind::If { cond, then_block, else_block } => {
                 self.check_expression(node_id, *cond);
-                if !matches!(self.ast.nodes[*then_block].kind, NodeKind::Block { .. }) {
+                if !matches!(self.ast.nodes[then_block.0].kind, NodeKind::Block { .. }) {
                     self.errors.push(ValidationError {
                         node_id,
                         kind: ValidationErrorKind::NotABlock(*then_block)
                     });
                 }
                 if let Some(if_or_block) = else_block {
-                    if !matches!(self.ast.nodes[*if_or_block].kind, NodeKind::Block { .. } | NodeKind::If { .. }) {
+                    if !matches!(self.ast.nodes[if_or_block.0].kind, NodeKind::Block { .. } | NodeKind::If { .. }) {
                         self.errors.push(ValidationError {
                             node_id,
                             kind: ValidationErrorKind::NotABlock(*if_or_block)
@@ -153,7 +152,7 @@ impl<'a> AstValidator<'a> {
                 }
             }
             NodeKind::Loop { block } => {
-                if !matches!(self.ast.nodes[*block].kind, NodeKind::Block { .. }) {
+                if !matches!(self.ast.nodes[block.0].kind, NodeKind::Block { .. }) {
                     self.errors.push(ValidationError {
                         node_id,
                         kind: ValidationErrorKind::NotABlock(*block)
@@ -180,18 +179,21 @@ impl<'a> AstValidator<'a> {
                 self.check_expression(node_id, *array);
                 self.check_expression(node_id, *index);
             }
-            NodeKind::TupleIndexExpression { tuple, .. } => {
+            NodeKind::TupleIndexExpression { tuple, index: _ } => {
                 self.check_expression(node_id, *tuple);
             }
-            NodeKind::PathExpression { segments }
-            | NodeKind::TypePath { segments } => {
+            NodeKind::PathExpression { qself, segments }
+            | NodeKind::TypePath { qself, segments } => {
                 for seg_id in segments {
-                    if !matches!(self.ast.nodes[*seg_id].kind, NodeKind::PathSegment { .. }) {
+                    if !matches!(self.ast.nodes[seg_id.0].kind, NodeKind::PathSegment { .. }) {
                         self.errors.push(ValidationError {
                             node_id,
                             kind: ValidationErrorKind::InvalidPathSegment(*seg_id),
                         });
                     }
+                }
+                if let Some(qself) = qself {
+                    self.check_type(node_id, *qself);
                 }
             }
             NodeKind::TypeTuple { elements } => {
@@ -206,12 +208,12 @@ impl<'a> AstValidator<'a> {
             NodeKind::TypeSlice { ty } => {
                 self.check_type(node_id, *ty);
             }
-            NodeKind::PathSegment { args, .. } => {
+            NodeKind::PathSegment { args, ident: _ } => {
                 for ty in args {
                     self.check_type(node_id, *ty);
                 }
             }
-            NodeKind::LetStmt { name, ty, value , ..} => {
+            NodeKind::LetStmt { name, ty, value , mutable: _ } => {
                 if !Self::is_snake_case(name) {
                     self.errors.push(ValidationError {
                         node_id,
@@ -231,7 +233,7 @@ impl<'a> AstValidator<'a> {
             NodeKind::ExprStmt { expr } => {
                 self.check_expression(node_id, *expr);
             }
-            NodeKind::Function { name, params, return_type, body, .. } => {
+            NodeKind::Function { name, params, return_type, body, public: _ } => {
                 if !Self::is_snake_case(name) {
                     self.errors.push(ValidationError {
                         node_id,
@@ -256,14 +258,14 @@ impl<'a> AstValidator<'a> {
                     }
                     self.check_type(node_id, *ty);
                 }
-                if !matches!(self.ast.nodes[*body].kind, NodeKind::Block { .. }) {
+                if !matches!(self.ast.nodes[body.0].kind, NodeKind::Block { .. }) {
                     self.errors.push(ValidationError {
                         node_id,
                         kind: ValidationErrorKind::NotABlock(*body)
                     });
                 }
             }
-            NodeKind::Module { name, items, .. } => {
+            NodeKind::Module { name, items, public: _ } => {
                 if !Self::is_snake_case(name) {
                     self.errors.push(ValidationError {
                         node_id,
@@ -275,7 +277,7 @@ impl<'a> AstValidator<'a> {
                 }
                 if let Some(items) = items {
                     for item in items {
-                        if !self.is_item(&self.ast.nodes[*item]) {
+                        if !self.ast.nodes[item.0].kind.is_item() {
                             self.errors.push(ValidationError {
                                 node_id,
                                 kind: ValidationErrorKind::NotAnItem(*item),
@@ -289,9 +291,9 @@ impl<'a> AstValidator<'a> {
                     });
                 }
             }
-            NodeKind::UseDecl { use_tree, .. } => {
+            NodeKind::UseDecl { use_tree, public: _ } => {
                 if !matches!(
-                    self.ast.nodes[*use_tree].kind,
+                    self.ast.nodes[use_tree.0].kind,
                     NodeKind::UsePath { .. } |
                     NodeKind::UseGroup { .. } |
                     NodeKind::UseName { .. } |
@@ -304,9 +306,9 @@ impl<'a> AstValidator<'a> {
                     });
                 }
             }
-            NodeKind::UsePath { tree, .. } => {
+            NodeKind::UsePath { tree, ident: _ } => {
                 if !matches!(
-                    self.ast.nodes[*tree].kind,
+                    self.ast.nodes[tree.0].kind,
                     NodeKind::UsePath { .. } |
                     NodeKind::UseGroup { .. } |
                     NodeKind::UseName { .. } |
@@ -322,7 +324,7 @@ impl<'a> AstValidator<'a> {
             NodeKind::UseGroup { trees } => {
                 for tree in trees {
                     if !matches!(
-                        self.ast.nodes[*tree].kind,
+                        self.ast.nodes[tree.0].kind,
                         NodeKind::UsePath { .. } |
                         NodeKind::UseGroup { .. } |
                         NodeKind::UseName { .. } |
@@ -340,7 +342,7 @@ impl<'a> AstValidator<'a> {
     }
 
     fn check_expression(&mut self, node_id: NodeId, check: NodeId) {
-        if !self.is_expression(&self.ast.nodes[check]) {
+        if !self.ast.nodes[check.0].kind.is_expression() {
             self.errors.push(ValidationError {
                 node_id,
                 kind: ValidationErrorKind::NotAnExpression(check)
@@ -349,7 +351,7 @@ impl<'a> AstValidator<'a> {
     }
 
     fn check_type(&mut self, node_id: NodeId, check: NodeId) {
-        if !self.is_type(&self.ast.nodes[check]) {
+        if !self.ast.nodes[check.0].kind.is_type() {
             self.errors.push(ValidationError {
                 node_id,
                 kind: ValidationErrorKind::NotAType(check)
@@ -362,175 +364,10 @@ impl<'a> AstValidator<'a> {
     fn is_valid_lhs(&self, node: &Node) -> bool {
         matches!(
             node.kind,
-            NodeKind::UnderscoreExpr |              // neglect
             NodeKind::PathExpression { .. } |       // variable
             NodeKind::IndexExpression { .. } |      // write into array
             NodeKind::TupleIndexExpression { .. }   // write into tuple
         )
-    }
-
-    fn is_expression(&self, node: &Node) -> bool {
-        // exhaustive to make sure an error gets reported if a new node kind is added
-        match node.kind {
-            NodeKind::Literal(_)
-            | NodeKind::Unary { .. }
-            | NodeKind::Binary { .. }
-            | NodeKind::Call { .. }
-            | NodeKind::Block { .. }
-            | NodeKind::If { .. }
-            | NodeKind::Loop { .. }
-            | NodeKind::Return { .. }
-            | NodeKind::Break { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Array { .. }
-            | NodeKind::ArrayRepeat { .. }
-            | NodeKind::UnderscoreExpr
-            | NodeKind::IndexExpression { .. }
-            | NodeKind::TupleIndexExpression { .. }
-            | NodeKind::PathExpression { .. }
-            | NodeKind::ErrorExpr => true,
-
-            NodeKind::TypePath { .. }
-            | NodeKind::TypeTuple { .. }
-            | NodeKind::TypeArray { .. }
-            | NodeKind::TypeSlice { .. }
-            | NodeKind::ErrorType
-            | NodeKind::PathSegment { .. }
-            | NodeKind::LetStmt { .. }
-            | NodeKind::ExprStmt { .. }
-            | NodeKind::EmptyStmt
-            | NodeKind::Function { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::UseDecl { .. }
-            | NodeKind::UsePath { .. }
-            | NodeKind::UseGroup { .. }
-            | NodeKind::UseName { .. }
-            | NodeKind::UseRename { .. }
-            | NodeKind::UseGlob => false,
-        }
-    }
-
-    fn is_statement(&self, node: &Node) -> bool {
-        // exhaustive to make sure an error gets reported if a new node kind is added
-        match node.kind {
-            NodeKind::LetStmt { .. }
-            | NodeKind::ExprStmt { .. }
-            | NodeKind::EmptyStmt
-            | NodeKind::Function { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::UseDecl { .. } => true,
-
-            NodeKind::Literal(_)
-            | NodeKind::Unary { .. }
-            | NodeKind::Binary { .. }
-            | NodeKind::Call { .. }
-            | NodeKind::Block { .. }
-            | NodeKind::If { .. }
-            | NodeKind::Loop { .. }
-            | NodeKind::Return { .. }
-            | NodeKind::Break { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Array { .. }
-            | NodeKind::ArrayRepeat { .. }
-            | NodeKind::UnderscoreExpr
-            | NodeKind::IndexExpression { .. }
-            | NodeKind::TupleIndexExpression { .. }
-            | NodeKind::PathExpression { .. }
-            | NodeKind::ErrorExpr
-            | NodeKind::TypePath { .. }
-            | NodeKind::TypeTuple { .. }
-            | NodeKind::TypeArray { .. }
-            | NodeKind::TypeSlice { .. }
-            | NodeKind::ErrorType
-            | NodeKind::PathSegment { .. }
-            | NodeKind::UsePath { .. }
-            | NodeKind::UseGroup { .. }
-            | NodeKind::UseName { .. }
-            | NodeKind::UseRename { .. }
-            | NodeKind::UseGlob => false,
-        }
-    }
-
-    fn is_type(&self, node: &Node) -> bool {
-        // exhaustive to make sure an error gets reported if a new node kind is added
-        match node.kind {
-            NodeKind::TypePath { .. }
-            | NodeKind::TypeTuple { .. }
-            | NodeKind::TypeArray { .. }
-            | NodeKind::TypeSlice { .. }
-            | NodeKind::ErrorType => true,
-
-            NodeKind::Literal(_)
-            | NodeKind::Unary { .. }
-            | NodeKind::Binary { .. }
-            | NodeKind::Call { .. }
-            | NodeKind::Block { .. }
-            | NodeKind::If { .. }
-            | NodeKind::Loop { .. }
-            | NodeKind::Return { .. }
-            | NodeKind::Break { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Array { .. }
-            | NodeKind::ArrayRepeat { .. }
-            | NodeKind::UnderscoreExpr
-            | NodeKind::IndexExpression { .. }
-            | NodeKind::TupleIndexExpression { .. }
-            | NodeKind::PathExpression { .. }
-            | NodeKind::ErrorExpr
-            | NodeKind::PathSegment { .. }
-            | NodeKind::LetStmt { .. }
-            | NodeKind::ExprStmt { .. }
-            | NodeKind::EmptyStmt
-            | NodeKind::Function { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::UseDecl { .. }
-            | NodeKind::UsePath { .. }
-            | NodeKind::UseGroup { .. }
-            | NodeKind::UseName { .. }
-            | NodeKind::UseRename { .. }
-            | NodeKind::UseGlob => false,
-        }
-    }
-
-    fn is_item(&self, node: &Node) -> bool {
-        // exhaustive to make sure an error gets reported if a new node kind is added
-        match node.kind {
-            NodeKind::Function { .. }
-            | NodeKind::Module { .. }
-            | NodeKind::UseDecl { .. } => true,
-            
-            NodeKind::Literal(_)
-            | NodeKind::Unary { .. }
-            | NodeKind::Binary { .. }
-            | NodeKind::Call { .. }
-            | NodeKind::Block { .. }
-            | NodeKind::If { .. }
-            | NodeKind::Loop { .. }
-            | NodeKind::Return { .. }
-            | NodeKind::Break { .. }
-            | NodeKind::Tuple { .. }
-            | NodeKind::Array { .. }
-            | NodeKind::ArrayRepeat { .. }
-            | NodeKind::UnderscoreExpr
-            | NodeKind::IndexExpression { .. }
-            | NodeKind::TupleIndexExpression { .. }
-            | NodeKind::PathExpression { .. }
-            | NodeKind::ErrorExpr
-            | NodeKind::TypePath { .. }
-            | NodeKind::TypeTuple { .. }
-            | NodeKind::TypeArray { .. }
-            | NodeKind::TypeSlice { .. }
-            | NodeKind::ErrorType
-            | NodeKind::PathSegment { .. }
-            | NodeKind::LetStmt { .. }
-            | NodeKind::ExprStmt { .. }
-            | NodeKind::EmptyStmt
-            | NodeKind::UsePath { .. }
-            | NodeKind::UseGroup { .. }
-            | NodeKind::UseName { .. }
-            | NodeKind::UseRename { .. }
-            | NodeKind::UseGlob => false,
-        }
     }
 
     fn is_snake_case(name: &str) -> bool {

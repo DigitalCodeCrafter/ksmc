@@ -1,25 +1,25 @@
 
 Program         = { Item };
 
-(* imports, structs, and enums later *)
+(* structs, enums, implements, traits later *)
 Item            = ["pub"], ( FunctionDecl | Module | UseDecl );
 
 (* --------- Items ---------- *)
 
 (* generics later *)
-FunctionDecl    = "fn", Identifier, "(", [ FunctionParams ], ")", [ "->", Type ], BlockExpression;
+FunctionDecl    = "fn", Identifier, [ GenericArgs ], "(", [ FunctionParams ], ")", [ "->", Type ], BlockExpression;
+(* self param later *)
+FunctionParams  = FunctionParam, { ",", FunctionParam }, [","];
+FunctionParam   = Identifier, ":", Type;
 
 Module          = "mod", Identifier, ";"
                 | "mod", Identifier, "{", { Item } ,"}";
 
 UseDecl         = "use", UseTree, ";";
-UseTree         = Identifier, { "::", UseTree }
+UseTree         = UseIdent, { "::", UseTree }
                 | "{", UseTree, { ",", UseTree }, [ "," ], "}"
                 | "*";
-
-(* self param later *)
-FunctionParams  = FunctionParam, { ",", FunctionParam }, [","];
-FunctionParam   = Identifier, ":", Type;
+UseIdent        = Identifier | "crate" | "super" | "self";
 
 (* --------- Statements ---------- *)
 
@@ -36,6 +36,7 @@ ExpressionStatement = Expression, ";" ;
 
 Expression      = LiteralExpression
                 | PathExpression
+                | QualifiedExpressionPath
                 | OperationExpression
                 | GroupedExpression
                 | CallExpression
@@ -52,8 +53,11 @@ Expression      = LiteralExpression
 
 LiteralExpression = STRING | INT | FLOAT | "true" | "false";
 
-PathExpression  = PathSegment, { "::", PathSegment };
-PathSegment     = Identifier;
+QualifiedExpressionPath = QualifiedPathType, "::", PathExpression;
+QualifiedPathType   = "<", Type, ["as", TypePath], ">";
+PathExpression      = PathSegment, { "::", PathSegment };
+PathSegment         = PathIdentSegment, [ "::", GenericArgs ];
+PathIdentSegment    = Identifier | "crate" | "super" | "self" | "Self";
 
 OperationExpression = ArithmeticExpression
                     | NegationExpression
@@ -85,8 +89,8 @@ IfExpression    = "if", Expression, BlockExpression, [ "else", ( BlockExpression
 LoopExpression  = "loop", BlockExpression;
 
 ArrayExpression = "[", [ ArrayElements ], "]" ;
-ArrayElements = Expression, ";", Expression
-              | Expression, { ",", Expression }, [ "," ];
+ArrayElements   = Expression, ";", Expression
+                | Expression, { ",", Expression }, [ "," ];
 
 IndexExpression = Expression, "[", Expression, "]";
 
@@ -101,6 +105,7 @@ BlockExpression = "{", { Statement }, [ Expression ], "}";
 
 Type            = ParenthType
                 | TypePath
+                | QualifiedTypePath
                 | TupleType
                 | ArrayType
                 | SliceType
@@ -108,11 +113,13 @@ Type            = ParenthType
 
 ParenthType     = "(", Type, ")";
 
+QualifiedTypePath = QualifiedPathType, "::", TypePath;
 TypePath        = TypePathSegment, { "::", TypePathSegment };
-TypePathSegment = Identifier, [ "::" ], [ GenericArgs ];
+TypePathSegment = PathIdentSegment, [ "::" ], [ GenericArgs ];
 
 GenericArgs     = "<", ">"
-                | "<", Type, { ",", Type }, [ "," ], ">";
+                | "<", GenericArg, { ",", GenericArg }, [ "," ], ">";
+GenericArg      = Type;
 
 TupleType       = "(", Type, ",", { Type, "," }, [ Type ], ")";
 

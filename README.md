@@ -40,6 +40,8 @@ Licensed under [MIT License](LICENSE)
 ## Roadmap
 
  - minimal working compiler
+ - pointers (needs extension of kOS)
+ - expansive type system
  - optimization passes
  - compiler safety options
 

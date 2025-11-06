@@ -1,5 +1,5 @@
 use std::{collections::HashSet, path::{Path, PathBuf}};
-use crate::compiler::{ast::{Node, NodeId, NodeKind, AST}, lexer::Token, CompilerError};
+use crate::compiler::{CompilerError, ast::{AST, Node, NodeKind, NodeId}, lexer::Token};
 
 #[derive(Debug)]
 pub enum ExpandError {
@@ -49,7 +49,7 @@ impl<'a> Expander<'a> {
     }
 
     fn expand_node(&mut self, node_id: NodeId, current_path: &Path) -> Result<(), CompilerError> {
-        let kind = self.ast.nodes[node_id].kind.clone();
+        let kind = self.ast.nodes[node_id.0].kind.clone();
 
         match kind {
             NodeKind::Module { public: _, ref name, ref items } => {
@@ -59,7 +59,7 @@ impl<'a> Expander<'a> {
                     self.expand_module_file(node_id, &module_path)?;
                 }
                 // search for children if inlined
-                if let NodeKind::Module { ref items, .. } = self.ast.nodes[node_id].kind {
+                if let NodeKind::Module { ref items, .. } = self.ast.nodes[node_id.0].kind {
                     if let Some(ids) = items {
                         let ids = ids.clone();
                         let mut dir = current_path.to_path_buf();
@@ -102,10 +102,10 @@ impl<'a> Expander<'a> {
         self.ast.nodes.extend(parsed_ast.nodes);
 
         for id in &mut parsed_ast.items {
-            *id += offset;
+            id.0 += offset;
         }
 
-        if let NodeKind::Module { items, .. } = &mut self.ast.nodes[node_id].kind {
+        if let NodeKind::Module { items, .. } = &mut self.ast.nodes[node_id.0].kind {
             *items = Some(parsed_ast.items);
         }
 
@@ -116,7 +116,7 @@ impl<'a> Expander<'a> {
 fn rebase_node_ids(nodes: &mut [Node], offset: usize) {
     for node in nodes {
         for child_id in node.children_mut() {
-            *child_id += offset;
+            child_id.0 += offset;
         }
     }
 }

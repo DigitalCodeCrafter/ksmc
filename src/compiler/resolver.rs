@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use crate::compiler::{CompilerError, ast::{AST, NodeId, NodeKind}};
 
-pub type ScopeId = usize;
-pub type SymbolId = usize;
+// TODO: validate "super", "crate", and "self" usage
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScopeId(pub usize);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SymbolId(pub usize);
 
 #[derive(Debug, Clone)]
 pub enum ResolveError {
@@ -35,21 +39,23 @@ pub enum Namespace {
 #[derive(Debug, Clone)]
 pub enum SymbolKind {
     /// variable defined using "let" or function parameter
-    Variable,
+    Local {
+        mutable: bool,
+        declared: Option<NodeId>,
+        init: Option<NodeId>,
+    },
     /// function defined using "fn"
-    Function,
+    Function {
+        ret: Option<NodeId>,
+        body: NodeId,
+    },
     /// module defined using "mod"
-    Module,
-    // placeholder
-    //Type,
+    Module
 }
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
-    pub name: String,
     pub kind: SymbolKind,
-    /// node of definition
-    pub node: NodeId,
     /// scope of definition (virtual for "let" statemets)
     pub defining_scope: ScopeId,
     /// for symbols introducing new scopes (e.g., functions, modules)
@@ -71,9 +77,9 @@ pub enum ScopeKind {
 }
 
 #[derive(Debug, Clone)]
-struct UseBinding {
-    use_decl: NodeId,
-    public: bool,
+pub struct UseBinding {
+    pub use_decl: NodeId,
+    pub public: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +103,7 @@ struct ResolverCache {
     name_cache: HashMap<(ScopeId, String, Namespace, ScopeId), Result<SymbolId, ResolveError>>,
 
     /// (path_hash, from_scope, namespace) -> SymbolId
-    path_cache: HashMap<(u64, ScopeId, Namespace), Result<SymbolId, ResolveError>>,
+    path_cache: HashMap<(u64, ScopeId, Namespace), Result<Vec<SymbolId>, ResolveError>>,
 
     /// (scope_id, use_decl_id, name) -> SymbolId
     use_cache: HashMap<(ScopeId, NodeId, String), Option<Result<SymbolId, ResolveError>>>,
@@ -114,14 +120,32 @@ impl ResolverCache {
 
 #[derive(Debug)]
 pub struct SymbolTable {
+    pub bindings: HashMap<NodeId, SymbolId>,
+    pub symbols: Vec<Symbol>,
+}
+impl SymbolTable {
+    /// gets the resolved symbol of a path node
+    pub fn get_bound(&self, node: NodeId) -> Option<&Symbol> {
+        let id =self.bindings.get(&node)?;
+        Some(&self.symbols[id.0])
+    }
 
+    /// gets the resolved symbol id of a path node
+    pub fn get_id(&self, node: NodeId) -> Option<SymbolId> {
+        self.bindings.get(&node).copied()
+    }
+
+    /// gets the symbol id corresponding symbol
+    pub fn get_symbol(&self, sym_id: SymbolId) -> &Symbol {
+        &self.symbols[sym_id.0]
+    }
 }
 
 pub fn resolve_all(ast: &AST) -> Result<SymbolTable, Vec<ResolveError>> {
     let mut resolver = Resolver::new(ast);
     
     if resolver.resolve().is_ok() {
-        Ok(resolver.symbol_table)
+        Ok(resolver.into_symbol_table())
     } else {
         Err(resolver.errors)
     }
@@ -137,7 +161,6 @@ pub struct Resolver<'a> {
     node_to_scope: HashMap<NodeId, ScopeId>,
     bindings: HashMap<NodeId, SymbolId>,
     errors: Vec<ResolveError>,
-    pub symbol_table: SymbolTable,
 }
 impl<'a> Resolver<'a> {
     pub fn new(ast: &'a AST) -> Self {
@@ -145,12 +168,11 @@ impl<'a> Resolver<'a> {
             ast,
             scopes: Vec::new(),
             symbols: Vec::new(),
-            root_scope: 0,
+            root_scope: ScopeId(0),
             cache: ResolverCache::new(),
             node_to_scope: HashMap::new(),
             bindings: HashMap::new(),
             errors: Vec::new(),
-            symbol_table: SymbolTable {  }
         }
     }
 
@@ -160,23 +182,39 @@ impl<'a> Resolver<'a> {
         self.build_scopes();
         
         for (node_id, node) in self.ast.nodes.iter().enumerate() {
-            let scope_id = self.node_to_scope.get(&node_id).copied().unwrap_or(self.root_scope);
+            let scope_id = self.node_to_scope.get(&NodeId(node_id)).copied().unwrap_or(self.root_scope);
 
             match &node.kind {
-                NodeKind::PathExpression { segments } => {
+                NodeKind::PathExpression { segments , ..} => {
                     let path = self.node_to_string_path(segments);
 
                     match self.resolve_path_from(&path, scope_id, Namespace::Value) {
-                        Ok(sym_id) => { self.bindings.insert(node_id, sym_id); },
+                        Ok(sym_ids) => {
+                            debug_assert_eq!(segments.len(), sym_ids.len());
+                            for (seg_id, sym_id) in segments.iter().zip(sym_ids.iter()) {
+                                self.bindings.insert(*seg_id, *sym_id);
+                            }
+                            if let Some(&last_sym) = sym_ids.last() {
+                                self.bindings.insert(NodeId(node_id), last_sym);
+                            }
+                        },
                         Err(err) => self.errors.push(err),
                     }
                 }
 
-                NodeKind::TypePath { segments } => {
+                NodeKind::TypePath { segments, .. } => {
                     let path = self.node_to_string_path(segments);
 
                     match self.resolve_path_from(&path, scope_id, Namespace::Type) {
-                        Ok(sym_id) => { self.bindings.insert(node_id, sym_id); },
+                        Ok(sym_ids) => {
+                            debug_assert_eq!(segments.len(), sym_ids.len());
+                            for (seg_id, sym_id) in segments.iter().zip(sym_ids.iter()) {
+                                self.bindings.insert(*seg_id, *sym_id);
+                            }
+                            if let Some(&last_sym) = sym_ids.last() {
+                                self.bindings.insert(NodeId(node_id), last_sym);
+                            }
+                        },
                         Err(err) => self.errors.push(err),
                     }
                 }
@@ -192,6 +230,13 @@ impl<'a> Resolver<'a> {
             Err(&self.errors)
         }
     }
+
+    pub fn into_symbol_table(self) -> SymbolTable {
+        SymbolTable {
+            bindings: self.bindings,
+            symbols: self.symbols,
+        }
+    }
 }
 
 impl<'a> Resolver<'a> {
@@ -200,38 +245,43 @@ impl<'a> Resolver<'a> {
 
         while let Some((nodes, mut current_scope)) = worklist.pop() {
             for node_id in nodes {
-                match &self.ast.nodes[node_id].kind {
+                match &self.ast.nodes[node_id.0].kind {
                     // simplest case: introduce a new Block scope
                     NodeKind::Block { nodes } => {
                         let block_scope = self.new_scope(ScopeKind::Block, Some(current_scope));
                         worklist.push((Box::new(nodes.iter().copied()), block_scope));
                     }
                     // special case: introduce a new virutal scope
-                    NodeKind::LetStmt { name, value, .. } => {
+                    NodeKind::LetStmt { name, value, mutable, ty } => {
                         // expression evaluated before definition
                         if let Some(expr) = value {
                             worklist.push((Box::new(std::iter::once(*expr)), current_scope));
+                        }
+                        if let Some(ty) = ty {
+                            worklist.push((Box::new(std::iter::once(*ty)), current_scope));
                         }
 
                         // new virtual scope
                         let new_scope = self.new_scope(ScopeKind::Virtual, Some(current_scope));
 
                         let sym = Symbol {
-                            name: name.clone(),
-                            kind: SymbolKind::Variable,
-                            node: node_id,
+                            kind: SymbolKind::Local {
+                                mutable: *mutable,
+                                declared: *ty,
+                                init: *value,
+                            },
                             defining_scope: new_scope,
                             inner_scope: None,
                             public: false,
                         };
 
-                        self.add_symbol(sym, new_scope, Namespace::Value);
+                        self.add_symbol(sym, new_scope, Namespace::Value, name.clone());
 
                         // following nodes should be inside the new virtual scope
                         current_scope = new_scope;
                     }
                     // item case: defined in non-virtual and adds a new item scope
-                    NodeKind::Function { name, body, params, public, .. } => {
+                    NodeKind::Function { public, name, body, params, return_type } => {
                         // define in non-virtual
                         let def_scope = self.find_structural_scope(current_scope);
                         
@@ -239,33 +289,39 @@ impl<'a> Resolver<'a> {
                         let func_scope = self.new_scope(ScopeKind::Function, Some(current_scope));
 
                         let sym = Symbol {
-                            name: name.clone(),
-                            kind: SymbolKind::Function,
-                            node: node_id,
+                            kind: SymbolKind::Function {
+                                ret: *return_type,
+                                body: *body,
+                            },
                             defining_scope: def_scope,
                             inner_scope: Some(func_scope),
                             public: *public,
                         };
-                        self.add_symbol(sym, def_scope, Namespace::Value);
+                        self.add_symbol(sym, def_scope, Namespace::Value, name.clone());
 
                         // add parameters
-                        for (param_name, _) in params.iter() {
-                            // FIXME: params shadow function in binding table due to same node_id
+                        for (param_name, type_node) in params.iter() {
                             let param_sym = Symbol {
-                                name: param_name.clone(),
-                                kind: SymbolKind::Variable,
-                                node: node_id,  // todo: add more symbol info
+                                kind: SymbolKind::Local {
+                                    mutable: false,
+                                    declared: Some(*type_node),
+                                    init: None,
+                                },
                                 defining_scope: func_scope,
                                 inner_scope: None,
                                 public: false,
                             };
-                            self.add_symbol(param_sym, func_scope, Namespace::Value);
+                            self.add_symbol(param_sym, func_scope, Namespace::Value, param_name.clone());
+                            worklist.push((Box::new(std::iter::once(*type_node)), def_scope));
+                        }
+                        if let Some(ty) = return_type {
+                            worklist.push((Box::new(std::iter::once(*ty)), def_scope));
                         }
 
                         worklist.push((Box::new(std::iter::once(*body)), func_scope));
                     }
                     // module case: defined in non-virtual and adds a new module scope
-                    NodeKind::Module { name, items, public, .. } => {
+                    NodeKind::Module { name, items, public } => {
                         // define in non-virutal
                         let def_scope = self.find_structural_scope(current_scope);
 
@@ -273,14 +329,12 @@ impl<'a> Resolver<'a> {
                         let inner = self.new_scope(ScopeKind::Module, Some(current_scope));
 
                         let sym = Symbol {
-                            name: name.clone(),
                             kind: SymbolKind::Module,
-                            node: node_id,
                             defining_scope: def_scope,
                             inner_scope: Some(inner),
                             public: *public,
                         };
-                        self.add_symbol(sym, def_scope, Namespace::Type);
+                        self.add_symbol(sym, def_scope, Namespace::Type, name.clone());
 
                         if let Some(items) = items {
                             worklist.push((Box::new(items.iter().copied()), inner));
@@ -291,11 +345,11 @@ impl<'a> Resolver<'a> {
                         // mark in non-virtual
                         let def_scope = self.find_structural_scope(current_scope);
                         
-                        self.scopes[def_scope].uses.push(UseBinding { use_decl: *use_tree, public: *public });
+                        self.scopes[def_scope.0].uses.push(UseBinding { use_decl: *use_tree, public: *public });
                     }
                     
-                    NodeKind::TypePath { segments }
-                    | NodeKind::PathExpression { segments } => {
+                    NodeKind::TypePath { segments, .. }
+                    | NodeKind::PathExpression { segments, .. } => {
                         self.node_to_scope.insert(node_id, current_scope);
                         worklist.push((Box::new(segments.iter().copied()), current_scope));
                     }
@@ -311,8 +365,8 @@ impl<'a> Resolver<'a> {
     fn new_scope(&mut self, kind: ScopeKind, parent: Option<ScopeId>) -> ScopeId {
         let id = self.scopes.len();
         let module_scope = match kind {
-            ScopeKind::Module => id,
-            _ => parent.map(|p| self.scopes[p].module_scope).unwrap()
+            ScopeKind::Module => ScopeId(id),
+            _ => parent.map(|p| self.scopes[p.0].module_scope).unwrap()
         };
         self.scopes.push(Scope {
             kind,
@@ -322,24 +376,23 @@ impl<'a> Resolver<'a> {
             type_symbols: HashMap::new(),
             uses: Vec::new(),
         });
-        id
+        ScopeId(id)
     }
 
-    fn add_symbol(&mut self, sym: Symbol, scope_id: ScopeId, ns: Namespace) -> SymbolId {
+    fn add_symbol(&mut self, sym: Symbol, scope_id: ScopeId, ns: Namespace, name: String) -> SymbolId {
         let id = self.symbols.len();
-        self.bindings.insert(sym.node, id);
         self.symbols.push(sym);
         let tabel = match ns {
-            Namespace::Value => &mut self.scopes[scope_id].value_symbols,
-            Namespace::Type => &mut self.scopes[scope_id].type_symbols,
+            Namespace::Value => &mut self.scopes[scope_id.0].value_symbols,
+            Namespace::Type => &mut self.scopes[scope_id.0].type_symbols,
         };
-        tabel.insert(self.symbols[id].name.clone(), id);
-        id
+        tabel.insert(name, SymbolId(id));
+        SymbolId(id)
     }
 
     fn find_structural_scope(&self, mut scope: ScopeId) -> ScopeId {
-        while let ScopeKind::Virtual = self.scopes[scope].kind {
-            scope = self.scopes[scope].parent.unwrap();
+        while let ScopeKind::Virtual = self.scopes[scope.0].kind {
+            scope = self.scopes[scope.0].parent.unwrap();
         }
         scope
     }
@@ -350,7 +403,7 @@ impl<'a> Resolver<'a> {
     fn node_to_string_path(&self, segs: &[NodeId]) -> Vec<String> {
         segs.iter()
             .map(|&id| {
-                if let NodeKind::PathSegment { ident, .. } = &self.ast.nodes[id].kind {
+                if let NodeKind::PathSegment { ident, .. } = &self.ast.nodes[id.0].kind {
                     ident.clone()
                 } else {
                     "<invalid>".to_string()
@@ -361,13 +414,13 @@ impl<'a> Resolver<'a> {
 
     /// resolve a `path` starting at `from_scope` to a symbol in namespace `namespace` without using cache lookup.
     /// Returns an error if the path couln't be resolved or the symbol is not visible
-    fn resolve_path_uncached(&mut self, path: &[String], from_scope: ScopeId, namespace: Namespace) -> Result<SymbolId, ResolveError> {
+    fn resolve_path_uncached(&mut self, path: &[String], from_scope: ScopeId, namespace: Namespace) -> Result<Vec<SymbolId>, ResolveError> {
         if path.is_empty() {
             return Err(ResolveError::UnresolvedPath { path: vec![], scope: from_scope });
         }
 
         let mut current_scope = from_scope;
-        let mut current_symbol: Option<SymbolId> = None;
+        let mut symbol_history = vec![];
 
         for (i, seg_name) in path.iter().enumerate() {
             let is_last = i == path.len() - 1;
@@ -383,10 +436,10 @@ impl<'a> Resolver<'a> {
             if !self.symbol_is_visible_from(sym_id, from_scope) {
                 return Err(ResolveError::PrivateSymbol { path: path[..=i].to_vec(), symbol: sym_id, from_scope });
             }
-            current_symbol = Some(sym_id);
+            symbol_history.push(sym_id);
 
             if !is_last {
-                let sym = &self.symbols[sym_id];
+                let sym = &self.symbols[sym_id.0];
                 if let SymbolKind::Module = sym.kind {
                     current_scope = sym.inner_scope.unwrap();
                 } else {
@@ -395,19 +448,20 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        Ok(current_symbol.unwrap()) // safe as atleast one segment has to have been resolved
+        Ok(symbol_history)
     }
 
     /// resolve a `path` starting at `from_scope` to a symbol in namespace `namespace`.
     /// Returns an error if the path couln't be resolved or the symbol is not visible
-    fn resolve_path_from(&mut self, path: &[String], from_scope: ScopeId, namespace: Namespace) -> Result<SymbolId, ResolveError> {
+    fn resolve_path_from<'this, 'path>(&'this mut self, path: &'path [String], from_scope: ScopeId, namespace: Namespace) -> Result<Vec<SymbolId>, ResolveError> {
         let path_hash = self.hash_path(path);
-        if let Some(cached) = self.cache.path_cache.get(&(path_hash, from_scope, namespace)) {
+        let key = (path_hash, from_scope, namespace);
+        if let Some(cached) = self.cache.path_cache.get(&key) {
             return cached.clone();
         }
 
         let result = self.resolve_path_uncached(path, from_scope, namespace);
-        self.cache.path_cache.insert((path_hash, from_scope, namespace), result.clone());
+        self.cache.path_cache.insert(key, result.clone());
         result
     }
 
@@ -422,8 +476,8 @@ impl<'a> Resolver<'a> {
     fn lookup_in_scope_uncached(&mut self, name: &str, mut scope_id: ScopeId, ns: Namespace, from_scope: ScopeId) -> Result<SymbolId, ResolveError> {
         loop {
             let table = match ns {
-                Namespace::Value => &self.scopes[scope_id].value_symbols,
-                Namespace::Type => &self.scopes[scope_id].type_symbols,
+                Namespace::Value => &self.scopes[scope_id.0].value_symbols,
+                Namespace::Type => &self.scopes[scope_id.0].type_symbols,
             };
             
             if let Some(&sym_id) = table.get(name) {
@@ -436,7 +490,7 @@ impl<'a> Resolver<'a> {
             }
             
             // drop scope
-            let scope = &self.scopes[scope_id];
+            let scope = &self.scopes[scope_id.0];
             match scope.kind {
                 ScopeKind::Block | ScopeKind::Virtual => {
                     // continue search in parent
@@ -477,7 +531,7 @@ impl<'a> Resolver<'a> {
         let mut stack = vec![(use_binding.use_decl, vec![])];
 
         while let Some((node_id, mut prefix)) = stack.pop() {
-            let node = &self.ast.nodes[node_id];
+            let node = &self.ast.nodes[node_id.0];
             match &node.kind {
                 NodeKind::UsePath { ident, tree } => {
                     prefix.push(ident.clone());
@@ -492,23 +546,23 @@ impl<'a> Resolver<'a> {
                     if ident == name {
                         let mut path = prefix;
                         path.push(ident.clone());
-                        return Some(self.resolve_path_from(&path, scope_id, ns));
+                        return Some(self.resolve_path_from(&path, scope_id, ns).map(|ids| ids[ids.len() - 1]));
                     }
                 }
                 NodeKind::UseRename { ident, name: alias } => {
                     if alias == name {
                         let mut path = prefix;
                         path.push(ident.clone());
-                        return Some(self.resolve_path_from(&path, scope_id, ns));
+                        return Some(self.resolve_path_from(&path, scope_id, ns).map(|ids| ids[ids.len() - 1]));
                     }
                 }
                 NodeKind::UseGlob => {
                     let target_sym = match self.resolve_path_from(&prefix, scope_id, Namespace::Type) {
-                        Ok(sym_id) => sym_id,
+                        Ok(sym_ids) => sym_ids[sym_ids.len() - 1],
                         Err(err) => return Some(Err(err))
                     };
 
-                    let Some(target_scope) = self.symbols[target_sym].inner_scope else {
+                    let Some(target_scope) = self.symbols[target_sym.0].inner_scope else {
                         return Some(Err(ResolveError::UnresolvedPath {
                             path: prefix.iter().cloned().chain(std::iter::once("*".to_string())).collect(),
                             scope: scope_id,
@@ -516,8 +570,8 @@ impl<'a> Resolver<'a> {
                     };
 
                     let table = match ns {
-                        Namespace::Value => &self.scopes[target_scope].value_symbols,
-                        Namespace::Type => &self.scopes[target_scope].type_symbols,
+                        Namespace::Value => &self.scopes[target_scope.0].value_symbols,
+                        Namespace::Type => &self.scopes[target_scope.0].type_symbols,
                     };
                     
                     // check if the use declaration scope can see the symbol
@@ -548,7 +602,7 @@ impl<'a> Resolver<'a> {
     /// * `from_scope`: the scope that is trying to find the symbol
     fn lookup_via_uses(&mut self, scope_id: ScopeId, name: &str, ns: Namespace, from_scope: ScopeId) -> Option<Result<SymbolId, ResolveError>> {
         // Quick check: has this query been seen before?
-        let uses = self.scopes[scope_id].uses.clone();
+        let uses = self.scopes[scope_id.0].uses.clone();
         for use_binding in &uses {
             if use_binding.public || self.is_within(from_scope, scope_id) {
                 let key = (scope_id, use_binding.use_decl, name.to_string());
@@ -571,7 +625,7 @@ impl<'a> Resolver<'a> {
      
     /// only publics are visible except when accessing from a descendant
     fn symbol_is_visible_from(&self, sym_id: SymbolId, from_scope: ScopeId) -> bool {
-        let sym = &self.symbols[sym_id];
+        let sym = &self.symbols[sym_id.0];
         sym.public || self.is_within(from_scope, sym.defining_scope)
     }
 
@@ -582,7 +636,7 @@ impl<'a> Resolver<'a> {
             if current == ancestor {
                 return true;
             }
-            if let Some(parent) = self.scopes[current].parent {
+            if let Some(parent) = self.scopes[current.0].parent {
                 current = parent;
             } else {
                 return false;
@@ -600,7 +654,7 @@ mod tests {
         let mut found = 0;
 
         while let Some(node_id) = scheduled.pop() {
-            match &ast.nodes[node_id].kind {
+            match &ast.nodes[node_id.0].kind {
                 NodeKind::UseName { ident }
                 | NodeKind::UsePath { ident, .. }
                 | NodeKind::Module { name: ident, .. }
@@ -613,11 +667,11 @@ mod tests {
                     }
                 }
 
-                NodeKind::TypePath { segments }
-                | NodeKind::PathExpression { segments } => {
+                NodeKind::TypePath { segments, .. }
+                | NodeKind::PathExpression { segments, .. } => {
                     let last = segments.iter()
                         .map(|&id| {
-                            if let NodeKind::PathSegment { ident, .. } = &ast.nodes[id].kind {
+                            if let NodeKind::PathSegment { ident, .. } = &ast.nodes[id.0].kind {
                                 ident.clone()
                             } else {
                                 "<invalid>".to_string()
@@ -669,7 +723,7 @@ mod tests {
                 _ => {}
             }
 
-            scheduled.extend(ast.nodes[node_id].children().collect::<Vec<_>>().iter().rev());
+            scheduled.extend(ast.nodes[node_id.0].children().collect::<Vec<_>>().iter().rev());
         }
 
         return None;
@@ -691,16 +745,15 @@ mod tests {
         let result = resolver.resolve();
 
         assert!(result.is_ok());
-        let sym_x = resolver.bindings[&find_ident(&ast, "x", 1).unwrap()];
         let sym_x_ref = resolver.bindings[&find_ident(&ast, "x", 2).unwrap()];
-        assert_eq!(sym_x, sym_x_ref, "x should resolve to same symbol");
+        assert!(matches!(resolver.symbols[sym_x_ref.0].kind, SymbolKind::Local { declared: None, init: Some(_), .. }), "x should be a inferred initialized local var");
     }
 
     #[test]
     fn resolves_shadowed_variables() {
         let code = r#"
             fn f() {
-                let x = 1;
+                let x;
                 {
                     let x = 2;
                     let y = x;
@@ -715,10 +768,8 @@ mod tests {
         let result = resolver.resolve();
 
         assert!(result.is_ok());
-
-        let inner_x = resolver.bindings[&find_ident(&ast, "x", 2).unwrap()];
         let y_ref_x = resolver.bindings[&find_ident(&ast, "x", 3).unwrap()];
-        assert_eq!(inner_x, y_ref_x);
+        assert!(matches!(resolver.symbols[y_ref_x.0].kind, SymbolKind::Local { declared: None, init: Some(_), .. }));
     }
 
     #[test]
