@@ -1,5 +1,5 @@
 
-// CURRENT GOAL: a typevisiter for primitive types and type inferrence
+// CURRENT GOAL: a type checker for primitive types and type inferrence
 // primitive types include
 // integers, floats, booleans, strings, arrays, tuples, unit, function
 
@@ -18,16 +18,10 @@
 // function parameters
 // mutability
 
-// Algorithm:
-// start at items
-// for every node in worklist:
-// - collect constraints
-// - if a required var isn't found, add to worklist and reshcedule
-// resolve constraints
 
 use std::collections::HashMap;
 
-use crate::compiler::{ast::{AST, BinaryOp, Literal, NodeId, NodeKind, UnaryOp}, resolver::{SymbolId, SymbolTable}};
+use crate::compiler::{ast::{AST, BinaryOp, Literal, NodeId, NodeKind, UnaryOp}, resolver::{SymbolId, SymbolKind, SymbolTable}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TypeVarId(usize);
@@ -35,6 +29,7 @@ struct TypeVarId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ConstraintId(usize);
 
+#[derive(Debug, Clone)]
 enum Type {
     Int,
     Float,
@@ -43,11 +38,13 @@ enum Type {
     Array { elem: Box<Type>, len: u32 },
     Tuple(Vec<Type>),
     Unit,
-    Func { params: Vec<Type>, ret: Box<Type> }
+    Func { def: SymbolId }
 }
 
 enum TypeVarKind {
-    Unknown
+    Unknown,
+    Resolved(Type),
+    Error,
 }
 
 struct TypeVar {
@@ -56,17 +53,19 @@ struct TypeVar {
 
 enum Constraint {
     // validate equality
-    Equal(TypeVarId, TypeVarId),    // a == b
-    // validate consistency
-    Resolved(TypeVarId, Type),      // a == primitive
+    Equal(TypeVarId, TypeOrVar),    // a == b
     // validate possibility
     BinaryOp { op: BinaryOp, lhs: TypeVarId, rhs: TypeVarId, out: TypeVarId },  // c == a (+ | > | && ...) b
     // valdidate possibility
     UnaryOp { op: UnaryOp, expr: TypeVarId, out: TypeVarId },                   // b == (! | -) a
     // validate indexable
     Indexing { indexee: TypeVarId, index: TypeVarId, out: TypeVarId },          // c == a[b]
-    // validate tuple
-    TupleIndexing { indexee: TypeVarId, index: u32, out: TypeVarId },           // c == a.idx
+    // validate args and callabel
+    Callable { callee: TypeVarId, call_result: TypeVarId, args: Vec<TypeVarId> }
+}
+enum TypeOrVar {
+    Var(TypeVarId),
+    Type(Type),
 }
 
 struct TypeChecker<'a> {
@@ -77,7 +76,7 @@ struct TypeChecker<'a> {
     node_types: HashMap<NodeId, TypeVarId>,
     symbol_types: HashMap<SymbolId, TypeVarId>,
 
-    worklist: Vec<NodeId>,
+    errors: Vec<String>,
 }
 impl<'a> TypeChecker<'a> {
     fn new(ast: &'a AST, symbols: &'a SymbolTable) -> Self {
@@ -88,8 +87,13 @@ impl<'a> TypeChecker<'a> {
             constraints: Vec::new(),
             node_types: HashMap::new(),
             symbol_types: HashMap::new(),
-            worklist: ast.items.clone(),
+
+            errors: Vec::new(),
         }
+    }
+
+    fn check_all(&mut self) {
+
     }
 
     fn new_var(&mut self) -> TypeVarId {
@@ -98,99 +102,149 @@ impl<'a> TypeChecker<'a> {
         id
     }
 
-    fn push_constraint(&mut self, constraint: Constraint) -> ConstraintId {
-        let id = ConstraintId(self.constraints.len());
-        self.constraints.push(constraint);
+    fn new_unit(&mut self) -> TypeVarId {
+        let id = TypeVarId(self.vars.len());
+        self.vars.push(TypeVar { kind: TypeVarKind::Resolved(Type::Unit) });
         id
     }
 
-    // bool for "try again later"
-    fn visit_expr(&mut self, node_id: NodeId) -> Result<bool, String> {
-        let Some(node) = self.ast.get(node_id) else { return Err(format!("{:?} does not exist", node_id)); };
-        if !node.kind.is_expression() { return Err(format!("{:?} is not an expression", node.kind)); }
+    fn new_error(&mut self) -> TypeVarId {
+        let id = TypeVarId(self.vars.len());
+        self.vars.push(TypeVar { kind: TypeVarKind::Error });
+        id
+    }
 
-        // get or create var
+    fn push_constraint(&mut self, constraint: Constraint) -> ConstraintId {
+        let id = ConstraintId(self.constraints.len());
+        self.constraints.push(constraint);
+        // insert unification here
+        id
+    }
+
+    fn error(&mut self, var: TypeVarId, msg: String) {
+        self.errors.push(msg);
+        self.vars.get_mut(var.0).map(|v| v.kind = TypeVarKind::Error);
+    }
+
+}
+
+impl<'a> TypeChecker<'a> {
+    fn check_expr(&mut self, node_id: NodeId) -> Result<TypeVarId, String> {
+        let Some(node) = self.ast.get(node_id) else { return Err(format!("{:?} does not exist", node_id)); };
+        if !node.kind.is_expression() { return Err(format!("{:?} is not an expression", node)); };
+
         let var = self.node_types
             .get(&node_id)
             .copied()
             .unwrap_or_else(|| self.new_var());
 
-        if match &node.kind {
-            NodeKind::Literal(lit) => self.visit_literal(var, lit),
-            NodeKind::Unary { op, expr } => self.visit_unary(var, *op, *expr),
-            NodeKind::Binary { op, lhs, rhs } => self.visit_binary(var, *op, *lhs, *rhs),
-            NodeKind::Call { callee, args } => self.visit_call(var, *callee, args),
+        match &node.kind {
+            NodeKind::Literal(lit) => self.check_lit(var, lit),
+            NodeKind::Unary { op, expr } => self.check_unary(var, *op, *expr),
+            NodeKind::Binary { op, lhs, rhs } => self.check_binary(var, *op, *lhs, *rhs),
+            NodeKind::Call { callee, args } => self.check_call(var, *callee, args),
             NodeKind::Block { nodes } => todo!("blocks"),
             NodeKind::If { cond, then_block, else_block } => todo!("if"),
-            NodeKind::Loop { block } => todo!("if"),
-            NodeKind::Return { expr } => todo!("return"),
-            NodeKind::Break { expr } => todo!("break"),
-            NodeKind::Tuple { elements } => todo!("tuple"),
-            NodeKind::Array { elements } => todo!("array"),
-            NodeKind::ArrayRepeat { value, count } => todo!("array"),
-            NodeKind::IndexExpression { array, index } => todo!("index"),
-            NodeKind::TupleIndexExpression { tuple, index } => todo!("tupel idx"),
-            NodeKind::PathExpression { qself, segments } => todo!("vars"),
-            _ => false,
-        } {
-            return Ok(true);
+            NodeKind::Loop { block } => todo!("loops"),
+            NodeKind::Return { expr } => todo!("returns"),
+            NodeKind::Break { expr } => todo!("breaks"),
+            NodeKind::Tuple { elements } => todo!("tuples"),
+            NodeKind::Array { elements } => todo!("arrays"),
+            NodeKind::ArrayRepeat { value, count } => todo!("arrays"),
+            NodeKind::IndexExpression { array, index } => todo!("indexing"),
+            NodeKind::TupleIndexExpression { tuple, index } => todo!("indexing"),
+            NodeKind::PathExpression { qself, segments } => todo!("paths"),
+            NodeKind::ErrorExpr => {
+                self.error(var, format!("{:?} is an invalid expression", node_id));
+            }
+            _ => {}
         }
 
         self.node_types.insert(node_id, var);
-        Ok(false)
+        Ok(var)
+    }
+
+    fn check_lit(&mut self, var: TypeVarId, lit: &Literal) {
+        let ty = match lit {
+            Literal::Int(_) => Type::Int,
+            Literal::Float(_) => Type::Float,
+            Literal::Bool(_) => Type::Bool,
+            Literal::Str(_) => Type::String,
+        };
+
+        self.push_constraint(Constraint::Equal(var, TypeOrVar::Type(ty)));
+    }
+
+    fn check_unary(&mut self, var: TypeVarId, op: UnaryOp, expr: NodeId) {
+        let evar = match self.check_expr(expr) {
+            Ok(var) => var,
+            Err(e) => {
+                self.error(var, e);
+                return;
+            }
+        };
+
+        self.push_constraint(Constraint::UnaryOp { op, expr: evar, out: var });
+    }
+
+    fn check_binary(&mut self, var: TypeVarId, op: BinaryOp, lhs: NodeId, rhs: NodeId) {
+        let lvar = match self.check_expr(lhs) {
+            Ok(var) => var,
+            Err(e) => {
+                self.error(var, e);
+                return;
+            }
+        };
+        let rvar = match self.check_expr(rhs) {
+            Ok(var) => var,
+            Err(e) => {
+                self.error(var, e);
+                return;
+            }
+        };
+
+        self.push_constraint(Constraint::BinaryOp { op, lhs: lvar, rhs: rvar, out: var });
+    }
+
+    fn check_call(&mut self, var: TypeVarId, callee: NodeId, args: &[NodeId]) {
+        // expr type = function return type
+        // get function from callees resolved type
+        // resolve arg types = param types
+
+        let callee_var = match self.check_expr(callee) {
+            Ok(var) => var,
+            Err(e) => {
+                self.error(var, e);
+                return;
+            }
+        };
+
+        let mut arg_vars = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.check_expr(*arg) {
+                Ok(var) => arg_vars.push(var),
+                Err(e) => {
+                    self.error(var, e);
+                    return;
+                }
+            }
+        }
+
+        self.push_constraint(Constraint::Callable {
+            callee: callee_var,
+            call_result: var,
+            args: arg_vars,
+        });
+    }
+
+    fn check_block(&mut self, node: NodeId) {
+
     }
 }
 
-impl<'a> TypeChecker<'a> {
-    fn visit_literal(&mut self, var: TypeVarId, lit: &Literal) -> bool {
-        let constraint = match lit {
-            Literal::Bool(_) => Constraint::Resolved(var, Type::Bool),
-            Literal::Int(_) => Constraint::Resolved(var, Type::Int),
-            Literal::Float(_) => Constraint::Resolved(var, Type::Float),
-            Literal::Str(_) => Constraint::Resolved(var, Type::String),
-        };
-
-        self.constraints.push(constraint);
-        false
-    }
-
-    fn visit_unary(&mut self, var: TypeVarId, op: UnaryOp, expr: NodeId) -> bool {
-        let ty = match self.node_types.get(&expr) {
-            Some(ty) => *ty,
-            None => {
-                self.worklist.push(expr);
-                return true;
-            }
-        };
-
-        self.constraints.push(Constraint::UnaryOp { op, expr: ty, out: var });
-        false
-    }
-
-    fn visit_binary(&mut self, var: TypeVarId, op: BinaryOp, lhs: NodeId, rhs: NodeId) -> bool {
-        let lty = match self.node_types.get(&lhs) {
-            Some(ty) => *ty,
-            None => {
-                self.worklist.push(lhs);
-                return true;
-            }
-        };
-        let rty = match self.node_types.get(&rhs) {
-            Some(ty) => *ty,
-            None => {
-                self.worklist.push(rhs);
-                return true;
-            }
-        };
-
-        self.constraints.push(Constraint::BinaryOp { op, lhs: lty, rhs: rty, out: var });
-        false
-    }
-
-    fn visit_call(&mut self, var: TypeVarId, calle: NodeId, args: &[NodeId]) -> bool {
-        todo!("function calls")
-        // plan: look up definition from symbol table and types
-        // equal constraints for arg types -> arg = param
-        // equal constraint for return type and var
+impl<'a> TypeChecker<'a> {  
+    fn try_resolve_constraint(&mut self, _constraint: ConstraintId) -> Result<bool, String> {
+        
+        todo!("constraint resolution")
     }
 }

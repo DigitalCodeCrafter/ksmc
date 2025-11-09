@@ -54,9 +54,9 @@ pub enum NodeKind {
     EmptyStmt,
     
     // Items
-    Function { public:  bool, name: String, params: Vec<(String, NodeId)>, return_type: Option<NodeId>, body: NodeId },
-    Module { public:  bool, name: String, items: Option<Vec<NodeId>> },
-    UseDecl { public:  bool, use_tree: NodeId },
+    Function { public: bool, name: String, params: Vec<(String, NodeId)>, return_type: Option<NodeId>, body: NodeId },
+    Module { public: bool, name: String, items: Option<Vec<NodeId>> },
+    UseDecl { public: bool, use_tree: NodeId },
     
     UsePath { ident: String, tree: NodeId },
     UseGroup { trees: Vec<NodeId> },

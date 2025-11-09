@@ -9,7 +9,7 @@ A rust-based, assembler, disassembler, and compiler for **kOS** - a scripting mo
 
 ## Building
 
-Requires **Rust 1.86+**
+developed using **Rust 1.91**
 
 ```bash
 git clone https://github.com/<your-username>/ksmc.git
@@ -39,6 +39,7 @@ Licensed under [MIT License](LICENSE)
 
 ## Roadmap
 
+ - symbol resolver prelude
  - minimal working compiler
  - pointers (needs extension of kOS)
  - expansive type system

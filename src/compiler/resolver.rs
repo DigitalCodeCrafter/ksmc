@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use crate::compiler::{CompilerError, ast::{AST, NodeId, NodeKind}};
 
 // TODO: validate "super", "crate", and "self" usage
+// TODO: add prelude as outer most scope
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeId(pub usize);
@@ -46,6 +47,7 @@ pub enum SymbolKind {
     },
     /// function defined using "fn"
     Function {
+        params: Vec<NodeId>, // types
         ret: Option<NodeId>,
         body: NodeId,
     },
@@ -275,7 +277,8 @@ impl<'a> Resolver<'a> {
                             public: false,
                         };
 
-                        self.add_symbol(sym, new_scope, Namespace::Value, name.clone());
+                        let sym_id = self.add_symbol(sym, new_scope, Namespace::Value, name.clone());
+                        self.bindings.insert(node_id, sym_id);
 
                         // following nodes should be inside the new virtual scope
                         current_scope = new_scope;
@@ -290,14 +293,16 @@ impl<'a> Resolver<'a> {
 
                         let sym = Symbol {
                             kind: SymbolKind::Function {
-                                ret: *return_type,
                                 body: *body,
+                                ret: *return_type,
+                                params: params.iter().map(|(_, ty)| *ty).collect(),
                             },
                             defining_scope: def_scope,
                             inner_scope: Some(func_scope),
                             public: *public,
                         };
-                        self.add_symbol(sym, def_scope, Namespace::Value, name.clone());
+                        let sym_id = self.add_symbol(sym, def_scope, Namespace::Value, name.clone());
+                        self.bindings.insert(node_id, sym_id);
 
                         // add parameters
                         for (param_name, type_node) in params.iter() {
